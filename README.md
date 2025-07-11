@@ -1,6 +1,6 @@
 # SPARK: a nascent RNA simulator
 
-SPARK is a pipeline to generate _in silico_ nascent RNA datasets for short- or long-read RNA-sequencing to use in the optimization and validation of nascent RNA analyses.
+SPARK (Simulated Pre-mRNA and RNA Kinetics) is a pipeline to generate _in silico_ nascent RNA datasets for short- or long-read RNA-sequencing to use in the optimization and validation of nascent RNA analyses.
 
 In brief, these simulations generate reads from annotated mRNA isoforms and model transcription elongation rates for each nucleotide across a chosen number of genes. User-defined simulation parameters can be tuned to vary across a range of experimental conditions to generate data expected from approaches such as 4sU-seq, TT-seq, TimeLapse-seq, eSLAM-seq, 4sUDRB-seq, etc.
 
@@ -30,15 +30,15 @@ A spark.yml conda environment is provided.
 
 [Overview of SPARK (full pipeline)](#overview-of-spark)
 
-[Gene Selection](#step-1-gene-selection)
+[1. Gene Selection](#step-1-gene-selection)
 
-[Elongation Rates](#step-2-elongation-rates)
+[2. Elongation Rates](#step-2-elongation-rates)
 
-[Nascent RNA Labeling](#step-3-nascent-rna-labeling)
+[3. Nascent RNA Labeling](#step-3-nascent-rna-labeling)
 
-[Read Generation](#step-4-read-generation)
+[4. Read Generation](#step-4-read-generation)
 
-[Ground truth](#ground-truth)
+[NOTE: Ground truth](#ground-truth)
 
 
 ## Overview of SPARK
@@ -71,25 +71,23 @@ rates per region:
                         range of region sizes (default: 100,5000)
   --elong_rate_range ELONG_RATE_RANGE
                         range of elongation rates (default: 500,5000)
-  --pause_elong_rate PAUSE_ELONG_RATE
-                        elongation rate at pause sites (default: 0)
-  --pause_occur_chance PAUSE_OCCUR_CHANCE
-                        chance of a pause region (default: 0)
+  --pause_occur_probability PAUSE_OCCUR_PROBABILITY
+probability of having a pausing event across the isoform (default: 0)
   --flat_rates          all nucleotides have the same elongation rate (default: False)
   --gene_level          get only one region across the gene (default: False)
 
 labeling strategy:
-  --l L                 labeling time in minutes (default: 15)
+  --labeling_time L                 labeling time in minutes (default: 15)
   --seq_err SEQ_ERR     sequencing error rate (default: 0.0001,0.0002)
-  --nt_inc_rate NT_INC_RATE
-                        Comma-separated range of nucleotide incorporation proportions (default: 0.09,0.1)
-  --subs_rate SUBS_RATE
+  --nt_inc_prob NT_INC_PROB
+                        Comma-separated range of nucleotide incorporation probability (default: 0.09,0.1)
+  --subs_prob SUBS_PROB
                         Comma-separated range of nucleotide substitution proportions (default: 0.95,1)
   --sub_type SUB_TYPE   substitution type (default: T,T)
   --bkg_molecules BKG_MOLECULES
-                        proportion of molecules that are background (default: 0)
-  --treatment TREATMENT
-                        treatment condition (default: no DRB)
+                        proportion of molecules that are derived from non-labeled RNA (background; default: 0)
+  --drb DRB
+                        DRB treatment experiment for transcription synchronization (default: no DRB)
 
 sequencing strategy:
   --seq_tech {longread,shortread}
@@ -117,59 +115,71 @@ SPARK can be run in full or as specific modules to change specific parameters of
 
 ### Step 1: Gene Selection
 
-**Clustering by gene features (--mode tsvgeneration)**
+**Clustering by gene features (```--mode tsvgeneration```)**
 
 Rather than simulating random sequences, SPARK simulates reads from a user-provided reference genome to create more representative nucleotide content across reads. This mode analyzes sequence and isoform features (see figure) for all annotated genes in the provided genome, using the longest isoform per gene. Hierarchical clustering is then performed using these features to define groups of isoforms with similar metrics. The output is a tsv file per gene, where each row is a feature (exon or intron) and the last column contains the sequence for that feature.
 
 
 
-
 ### Step 2: Elongation Rates. 
 
-**Assigning an RNA Pol II elongation rate per nucleotide (--mode rates_per_region)**
+**Assigning an RNA Pol II elongation rate per nucleotide (```--mode rates_per_region```)**
 
-To simulate the variability in elongation rates across the gene sequence, this mode will assign an elongation rate (between the values specified on --elong_rate_range) to each nucleotide of the isoform.
+RNAPII elongation rates are likely not static across a gene. Additionally, any changes in elongation rats likely occur continuously, rather than in a step-wise fashion. To simulate the variability in elongation rates across the gene sequence, this mode will assign an elongation rate (in the range specified by ```--elong_rate_range```) to each nucleotide of the isoform. Elongation rates within this range are assigned to regions whose length is chosen from the range specified by ```--region_size_range```. Within each region, the elongation rate (in nt/min) changes linearly from the rate at the first nucleotide to the rate at the last nucleotide in that region. For example, in a 10nt region that starts at 1 nt/min and ends at 2nt/min, nucleotide #1 = 1 nt/min, #2 = 1.22, #3 = 1.33, ... until #10 at 2 nt/min.  
 
-Two output files per gene will be in the rate_per_gene directory and can be used as a ground truth to evaluate elongation rate estimation. The _RatesandTraversalTimes_ files contain the elongation rate per nucleotide, while the _VariableElongationRateRegions_ files contain the elongation rate variability information per region (see the “ground truth” section below).
 
-Each gene will have a number of regions depending on the user-defined values (--region_size_range option). Within each region, the elongation rate (in nt/min) for each nucleotide changes linearly from the rate at the first nucleotide to the rate at the last nucleotide in that region. For example, if a region contains 10 nucleotides, with the first nucleotide having an elongation rate of 1 and the last nucleotide having a rate of 2, the elongation rates for the nucleotides will increase evenly from 1 to 2. In this case, the second nucleotide will have a rate of 1.11, the third will have 1.22, the fourth 1.33, and so on, up to 2 at the last nucleotide. If --flat_rates is added, then all the nucleotides within the same region will have the same elongation rate. If both --flat_rates and --gene_level are added, all the nucleotides will have the same elongation rate.
+To simulate step-wise changes in elongation rates, users can specify ```--flat_rates``` to ensure all the nucleotides in a region have the same elongation rate. To simulate a single elongation region across the entire gene, users can specify ```--gene_level```.  Specifying both ```--flat_rates``` and ```--gene_level``` will create a single, non-varying elongation rate across the entire gene.
 
-Pauses can be added by setting the chances of a pausing event to happen with the --pause_occur_chance parameter being higher than 0.
 
+
+-->
+
+
+Finally, there is evidence that RNAPII can pause throughout a gene. Pauses in RNAPII elongation can be added at random nucleotides by specifying ```--pause_occur_probability```. Specifically, this sets a probability of each region having a pausing event. The timing of the pause is specified by ```--pause_time```, which is a range of time in minutes (default = [0.1,0.5]). 
+
+
+
+
+
+#### Output files
+Two output files per gene will be created in a new directory named _rate_per_gene_ to record the ground truth of elongation rates. The _RatesandTraversalTimes_ files contain the elongation rate per nucleotide, while the _VariableElongationRateRegions_ files contain the elongation rate variability information per region (see the [ground truth](#ground-truth) section for details of file format).
 
 
 ###  Step 3: Nascent RNA Labeling
 
-**mRNA generation (--mode labeling_strategy)**
+**mRNA generation (```--mode labeling_strategy```)**
 
-SPARK first simulates full-length mRNA isoforms based on the elongation rates generated by --mode rates_per_region. The user can opt to simulate a DRB-treated like 4sUDRB-seq, in which transcription is synchronized such that all RNAPIIs initiate at the TSS at the beginning of the nascent RNA experiment, or a native context in which RNAPII can be anywhere within the gene at the beginning of the nascent RNA experiment. 
+SPARK first simulates full-length mRNA isoforms based on the elongation rates generated by ```--mode rates_per_region```. Using these rates, transcription is simulated to create nascent pre-mRNA transcripts that are labeled (using a choice of a labeling strategy as described below). 
+
+First, there are two transcriptional conditions that can be simulated using ```--drb``: 
+
+(1) Nascent RNA enrichment after transcription synchronization with DRB  (_i.e._ 4sUDRB-seq), such that all RNAPIIs initiate at the transcription start site at the start of the labeling window. (default)
+
+(2)  A native context assuming steady-state transcription, in which RNAPII are already distributed across the gene body when labeling begins. (including ```--drb```)
 
 
-In this version of SPARK, we do not consider splicing, so there are no breaks in the isoform. If chosen to be simulated, background molecules are made as fully transcribed and unspliced molecules. If no labeling-driven substitutions are necessary, subs_rate should be set to 0.
 
-In this stage, SPARK simulates full-length mRNA isoforms based on elongation rates previously estimated by the rates_per_region module. The simulation can follow one of two biological scenarios. In a synchronized context—like in 4sUDRB-seq experiments—transcription is initiated simultaneously across all genes, with RNAPII beginning at the transcription start site at the start of the labeling window. In contrast, the native context assumes a steady-state transcriptional landscape, where RNAPIIs are already distributed along the gene body when labeling begins. This can be modulated using DRB or no DRB under the --treatment parameter.
+Second, SPARK simulates temporally-resolved nascent RNA sequencing using metabolic labeling. There are a number of parameters to determine the labeling probability, detection, and effciency. The labeling time is specified by ```--labeling_time```, which also determines how far  RNAPII elongates after its start point at the start of the labeling period. Specifically, the labeling time is used to calculate a total elongation distance considering the cumulative elongation rates across the gene. During this “time”, the probability that a labeled nucleotide is _in-silico_ incorporated into nascent molecules is specified by ```--nt_inc_prob```. Once incorporated, the probability that these labeled nucleotides undergo nucleoside re-encoding is specified by ```--subs_prob```. The nature of this re-encoding is specified by ```--sub_type```. For example, iodoacetamide or TFEA-induced re-encoding of 4sU results in a T-to-C conversion, so ```--sub_type T,C``` would simulate eSLAM-seq or enriched TimeLapse-seq experiments. To simulate a nascent RNA experiment without nucleoside labeling, users can specify ```--nt_inc_prob 0```.
 
-This version of SPARK does not model splicing, so transcripts are simulated as continuous, uninterrupted isoforms. If background molecules are included, they are assumed to be fully elongated and unspliced, representing transcripts not generated during the labeling window.
+The simulation labeling framework also allows for the introduction of two background signal sources:  
 
-The duration of labeling is specified with the --l option, which determines how long RNAPII are allowed to elongate for. During this time, labeled nucleotides can be incorporated to nascent mRNA molecules at rates defined by --nt_inc_rate, which reflects the efficiency of analog incorporation into nascent RNA. Once incorporated, these labeled nucleotides may undergo chemical substitutions or sequencing-induced artifacts, with a probability defined by --subs_rate. The nature of these substitutions is set with --sub_type, for example, with T-to-C conversions as commonly observed in 4sU experiments. If an experiment without nucleotide analogs wants to be simulated, then the user can set --nt_inc_rate to 0.
+Errors (substitutions) are introduced by technical steps in the experiment (e.g. sequencing). These errors can be incorporated by specifying ```--seq_err```, which sets the probability that there will be a random substitution at any base in the molecule.
 
-Sequencing error is modeled separately using the --seq_err option, allowing for realistic simulation of background sequencing noise. Any base will have a seq_err probability of getting a random error.
+Background, non-nascent transcripts. These are transcripts that are not transcribed during the labeling window, but may be present due to inefficient or non-specific nascent RNA pulldowns. This is specified by ```--bkg_molecules```, which sets a proportion of the molecules derived from background. These are simulated as fully transcribed, unspliced transcripts with no labeling.
 
-SPARK also allows for simulation of background transcripts—those not originating during the labeling window that are sequenced, for example, due to a lack of pulldown specificity—via the --bkg_molecules parameter, which defines what proportion of the molecules should be considered background. These are modeled as fully transcribed, unspliced transcripts. F
+NOTE: This version of SPARK does not consider splicing, so transcripts are simulated as continuous, uninterrupted isoforms. If background molecules are simulated, they are assumed to be fully elongated and unspliced pre-mRNA molecules, representing transcripts not generated during the labeling window.
 
 ### Step 4: Read Generation
 
-**Read generation (--mode seq_tech)**
+**Read generation (```--mode seq_tech```)**
 
-SPARK can generate either short or long-read sequencing reads from the mRNA isoforms simulated in --mode labeling_strategy. For long-reads, strandness refers to the default Oxford Nanopore considerations, where directRNA is sequenced from 3’ to 5’ and cDNA can be sequenced from either end.
+SPARK can generate either short-read or long-read sequencing reads from the mRNA transcripts produced by the ```--mode labeling_strategy``` step. The choice of sequencing technology is specified by ```--seq_tech```, which has options for _shortread_ (e.g. Illumina) or "longread" (e.g., Oxford Nanopore Technologies). By default, SPARK simulates short-read sequencing.
 
-SPARK can generate either short-read or long-read sequencing data from the mRNA isoforms produced in the --mode labeling_strategy step. The choice of sequencing technology is specified with the --seq_tech option, which supports "shortread" (Illumina-like) or "longread" (e.g., Oxford Nanopore Technologies). By default, SPARK simulates short-read sequencing.
+To simulate the number of reads that might be generated by genes that are expressed at different levels, a gene expression level is chosen from the range specified by  ```--tpm```.  The number of reads is also dependent on ```--seq_depth```, which defines the total number in the _in-silico_ library
 
-To realistically simulate the number of reads per gene according to isoform abundance, a value from the --tpm range is assigned to each gene; the tpm is then extrapolated to the total library --seq_depth that represents the total number of reads that the reads come from. These two parameters will determine how many reads per gene are simulated.
+For short-read simulations, fragmentation and size selection are modeled after the simulations described in [Pai _et al._, eLife 2017](https://elifesciences.org/articles/32537). Fragment insert sizes are specified by ```--insert_size```. Read length is specified by ```--read_length parameter```. The simulation of single-end (_SE_) or paired-end (_PE_) is specified by ```seq_type```. Finally, strandedness is specified by ```--s```, choosing from reverse-forward (_rf_), forward-reverse (_fr_), or _unstranded_. The default is _rf"_, which is typical for dUTP-based strand-specific RNA-seq protocols.
 
-For short-read simulations, fragmentation and size selection are modeled after the protocol described in [Pai et al, elife 2017](https://elifesciences.org/articles/32537). Fragment insert sizes can be tuned via the --insert_size option. The actual length of each sequencing read—applicable primarily for short reads—is set using the --read_length parameter. The --seq_type option accepts "SE" (single-end) or "PE" (paired-end), with "SE" as the default. Finally, the short-read library's strand specificity is defined using the --s option. Available choices include "rf" (reverse-forward), "fr" (forward-reverse), or "unstranded". By default, SPARK assumes "rf" strandedness, which is typical for dUTP-based strand-specific RNA-seq protocols.
-
-For long-read data, SPARK accounts for strand-specific considerations inherent to Oxford Nanopore's strandness data: in the directRNA approach, transcripts are sequenced in the 3′ to 5′ direction, while cDNA reads may originate from either end. This behavior is controlled using the --seq_type option, which can be set to "RNA" or "cDNA" for long reads. 
+For long-read data, SPARK defaults to Oxford Nanopore strand specifications: for directRNA, transcripts are sequenced in the 3′ to 5′ direction, while cDNA reads may originate from either end. This behavior is specified by ```--seq_type```, which can be set to "RNA" or "cDNA" for long reads. 
 
 
 ### Ground truth
@@ -177,30 +187,37 @@ For long-read data, SPARK accounts for strand-specific considerations inherent t
 Three types of ground truth information are stored to use in downstream analyses of the simulations:
 
 1. Regions over which elongation rates are varied, which are stored in the _VariableElongationRateRegions_ files containing the elongation rate information per region:
-| chromosome  | gene chromosome |
-| absolute_start  | absolute start position of the region |
-| absolute_end  | absolute end position of the region |
-| region_start_coord  | relative start position of the region |
-| region_end_coord  | relative end position of the region |
-| strand  | strand |
-| rate_initial  | elongation rate in bp per minute for the first nucleotide in the region |
-| rate_final  | elongation rate in bp per minute for the last nucleotide in the region |
-| rate_change_per_nt  | change in rate for each individual nucleotide in the region |
-| time_to_traverse  | time to traverse the entire region |
-| sequence  | region sequence |
-| region_number  | gene region the nucleotide belongs to|
+
+| Column Name          | Description                                                                 |
+|----------------------|-----------------------------------------------------------------------------|
+| chromosome           | gene chromosome                                                             |
+| absolute_start       | absolute start position of the region                                       |
+| absolute_end         | absolute end position of the region                                         |
+| region_start_coord   | relative start position of the region                                       |
+| region_end_coord     | relative end position of the region                                         |
+| strand               | strand                                                                      |
+| rate_initial         | elongation rate in bp per minute for the first nucleotide in the region     |
+| rate_final           | elongation rate in bp per minute for the last nucleotide in the region      |
+| rate_change_per_nt   | change in rate for each individual nucleotide in the region                 |
+| time_to_traverse     | time to traverse the entire region                                          |
+| sequence             | region sequence                                                             |
+| region_number        | gene region the nucleotide belongs to                                       |
 
 2. Per nucleotide elongation rates, which is stored in the _RatesandTraversalTimes_ files:
-| chromosome  | gene chromosome |
-| absolute_position  | absolute position of each nucleotide |
-| strand  | strand |
-| region_number  | gene region the nucleotide belongs to|
-| nucleotide_coord  | relative position of the nucleotide within the gene |
-| time_for_this_nt | time in minutes required to traverse the nucleotide |
-| rate_for_this_nt | elongation rate in bp per minute for the nucleotide |
-| rate_change_per_nt | elongation rate change between nucleotide n and n+1 |
-3. Per nucleotide substitutions. 
 
+| Column Name           | Description                                                                 |
+|------------------------|-----------------------------------------------------------------------------|
+| chromosome             | gene chromosome                                                             |
+| absolute_position      | absolute position of each nucleotide                                        |
+| strand                 | strand                                                                      |
+| region_number          | gene region the nucleotide belongs to                                       |
+| nucleotide_coord       | relative position of the nucleotide within the gene                         |
+| time_for_this_nt       | time in minutes required to traverse the nucleotide                         |
+| rate_for_this_nt       | elongation rate in bp per minute for the nucleotide                         |
+| rate_change_per_nt     | elongation rate change between nucleotide n and n+1                         |
+
+
+3. Per nucleotide substitutions.
 The read names contain information about the gene that the read belongs to, and the number and position of converted nucleotides in the read. For example:
 
 ```
@@ -219,3 +236,4 @@ Position of the substitutions in the read:
 ```
 
 Each read's ID begins with a capitalized section; reads coming from the same mRNA molecule share this capitalized ID prefix. A lowercase suffix will then differentiate individual reads. For read pairs, both reads will have identical IDs.
+
