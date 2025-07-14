@@ -135,8 +135,7 @@ To simulate step-wise changes in elongation rates, users can specify ```--flat_r
 
 Finally, there is evidence that RNAPII can pause throughout a gene. Pauses in RNAPII elongation can be added at random nucleotides by specifying ```--pause_occur_probability```. Specifically, this sets a probability of each region having a pausing event. The timing of the pause is specified by ```--pause_time```, which is a range of time in minutes (default = [0.1,0.5]). 
 
-
-![](figures/rates_with_pausev2.png)
+![](figures/rates_with_pause.png)
 
 #### Output files
 Two output files per gene will be created in a new directory named _rate_per_gene_ to record the ground truth of elongation rates. The _RatesandTraversalTimes_ files contain the elongation rate per nucleotide, while the _VariableElongationRateRegions_ files contain the elongation rate variability information per region (see the [ground truth](#ground-truth) section for details of file format).
