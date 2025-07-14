@@ -60,8 +60,8 @@ def defineElongRateRegions(input_df_basename, df, dna_sequence, min_length, max_
             sequence = dna_sequence[start_coord - 1 : end_coord]
             
             # make the rate_final very small
-            pause_rate_initial = round(pause_rate * random.uniform(0.9,1.1), 3)
-            pause_rate_final = round(pause_rate * random.uniform(0.9,1.1), 3)
+            pause_rate_initial = pause_rate
+            pause_rate_final = pause_rate
             rate_change_per_nt = (pause_rate_final - pause_rate_initial) / region_length
             
             # add a time_to_traverse for sanity checks
@@ -186,8 +186,8 @@ if __name__ == "__main__":
     parser.add_argument('--tsv', default='tmp.tsv', help='full path to input tsv file')
     parser.add_argument('--region_size_range', type=str, default='100,5000', help='range of region sizes (in nt) to be randomly generated', required=False)
     parser.add_argument('--elong_rate_range', type=str, default='500,5000', help='range of elongation rates (in nt/min) to be applied to random regions', required=False)
-    parser.add_argument('--pause_elong_rate', type=float, default=0, help='elongation rate (in nt/min) at simulated PolII pause sites', required=False)
-    parser.add_argument('--pause_occur_chance', type=float, default=0, help='chance of a pause region to be introduced as a region', required=False)
+    parser.add_argument('--pause_occur_probability', type=float, default=0, help='probability of having a pausing event across the isoform', required=False)
+    parser.add_argument('--pause_time', default="0.1,0.5", type=str, help="length of the pausing event in minutes", required=False)
     parser.add_argument('--o', type=str, default='./', help='output path')
     parser.add_argument('--flat_rates', action='store_true', help='all nucleotides within the region have the same elongation rate. If used with gene_level all nucleotides will have the same elongation rates.')
     parser.add_argument('--gene_level', action='store_true', help='get only one region across the gene. If used with flat_rates all nucleotides will have the same elongation rates.')
@@ -198,10 +198,14 @@ if __name__ == "__main__":
     region_size_range_min, region_size_range_max = map(int, args.region_size_range.split(','))
 
     #elong_rate_range = [int(x) for x in args.elong_rate_range.split(',')]
-    elong_rate_range_min, elong_rate_range_max = map(int, args.elong_rate_range.split(','))
+    elong_rate_range_min, elong_rate_range_max = map(float, args.elong_rate_range.split(','))
 
-    pause_elong_rate = args.pause_elong_rate
-    pause_chance = args.pause_occur_chance
+    #Get pause duration and convert it to elongation rate for calculation
+    pause_chance = args.pause_occur_probability
+    pause_length_min, pause_length_max = map(float, args.pause_time.split(','))
+    pause_duration = random.uniform(pause_length_min, pause_length_max)
+    pause_elong_rate=1/pause_duration
+
     
     # create strings for arguments needed in functions 1, 2, and 3 for output file naming
     region_size_name = str(region_size_range_min) + '-' + str(region_size_range_max)

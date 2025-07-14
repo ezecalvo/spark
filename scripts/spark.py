@@ -38,20 +38,20 @@ def main():
     # Arguments for rates_per_region
     group_rates_per_region.add_argument("--region_size_range", default="100,5000", help="range of region sizes")
     group_rates_per_region.add_argument("--elong_rate_range", default="500,5000", help="range of elongation rates")
-    group_rates_per_region.add_argument("--pause_elong_rate", default=0, type=int, help="elongation rate at pause sites")
-    group_rates_per_region.add_argument("--pause_occur_chance", default=0, type=float, help="chance of a pause region")
+    group_rates_per_region.add_argument("--pause_occur_probability", default=0, type=float, help="probability of having a pausing event across the isoform")
+    group_rates_per_region.add_argument('--pause_time',default="0.1,0.5", type=str, help="length of the pausing event in minutes", required=False)
     group_rates_per_region.add_argument("--flat_rates", action="store_true", help="all nucleotides have the same elongation rate")
     group_rates_per_region.add_argument("--gene_level", action="store_true", help="get only one region across the gene")
 
     # Arguments for labeling_strategy
     # group_labeling_strategy.add_argument("--labelingmode", type=str, default="monolabel", choices=["monolabel", "kineticbarcoding"], help="Labeling mode to use")
-    group_labeling_strategy.add_argument("--l", type=int, default=15, help="labeling time in minutes")
+    group_labeling_strategy.add_argument("--labeling_time", type=int, default=15, help="labeling time in minutes")
     group_labeling_strategy.add_argument("--seq_err", default="0.0001,0.0002", help="sequencing error rate")
-    group_labeling_strategy.add_argument('--nt_inc_rate',type=str,default='0.09,0.1',help='Comma-separated range of nucleotide incorporation proportions')
-    group_labeling_strategy.add_argument('--subs_rate',type=str,default='0.95,1',help='Comma-separated range of nucleotide substitution proportions')
+    group_labeling_strategy.add_argument('--nt_inc_prob',type=str,default='0.09,0.1',help='Comma-separated range of nucleotide incorporation probability')
+    group_labeling_strategy.add_argument('--subs_prob',type=str,default='0.95,1',help='Comma-separated range of nucleotide substitution proportions')
     group_labeling_strategy.add_argument("--sub_type", type=str, default="T,T", help="substitution type")
-    group_labeling_strategy.add_argument('--bkg_molecules', type=float, default=0,help='proportion of molecules that are background')
-    group_labeling_strategy.add_argument("--treatment", type=str, default="no DRB", help="treatment condition")
+    group_labeling_strategy.add_argument('--bkg_molecules', type=float, default=0,help='proportion of molecules that are derived from non-labeled RNA')
+    group_labeling_strategy.add_argument("--drb", action="store_true", help="DRB treatment experiment for transcription synchronization")
 
     # Arguments for seq_tech
     group_seq_tech.add_argument("--seq_tech", choices=["longread", "shortread"], default="shortread", help="sequencing technology")
@@ -64,6 +64,7 @@ def main():
 
     args = parser.parse_args()
     output_dir = args.o.rstrip("/")
+
 
     # Print errors if non-compatible options are specified
     #Seq type+strand
@@ -82,6 +83,11 @@ def main():
     #Not a proportion for bkg molecules
     if not (0.0 <= args.bkg_molecules <= 1.0):
         print("Error: --bkg_molecules must be a float between 0 and 1")
+        sys.exit(1)
+
+    #Not a probability for pausing event
+    if not (0.0 <= args.pause_occur_probability <= 1.0):
+        print("Error: --pause_occur_probability must be between 0 and 1")
         sys.exit(1)
 
 
@@ -105,15 +111,14 @@ def main():
         if not tsv_files:
             print(f"No TSV files found in {input_dir}")
             return
-
         for tsv in tsv_files:
             cmd_rates = [
                 f"python {os.path.join(SCRIPT_DIR, 'rates_per_region.py')}",
                 f"--tsv {tsv}",
                 f"--region_size_range {args.region_size_range}",
                 f"--elong_rate_range {args.elong_rate_range}",
-                f"--pause_elong_rate {args.pause_elong_rate}",
-                f"--pause_occur_chance {args.pause_occur_chance}",
+                f"--pause_time {args.pause_time}",
+                f"--pause_occur_probability {args.pause_occur_probability}",
                 f"--o {output_dir}"
             ]
             if args.flat_rates:
@@ -149,7 +154,7 @@ def main():
         #Store labeling time
         df_mean_elong = pd.read_csv(f"{output_dir}/rate_per_gene/mean_elong_rate.tsv", sep="\t")
         # Add labeling_time column
-        df_mean_elong["labeling_time"] = args.l
+        df_mean_elong["labeling_time"] = args.labeling_time
         # Write back to the same file
         df_mean_elong.to_csv(f"{output_dir}/rate_per_gene/mean_elong_rate.tsv", sep="\t", index=False)
 
@@ -163,21 +168,25 @@ def main():
                 print(f"Warning: nt file missing for {gene_id}, skipping.")
                 continue
 
+            treatment='no DRB'
+            if args.drb:
+                treatment='DRB'
+
             # if args.labelingmode == "monolabel":
             cmd_label = [
                 f"python {os.path.join(SCRIPT_DIR, 'mRNA_generator_monolabeled.py')}",
                 f"--region_file {region_file}",
                 f"--nt_file {nt_file}",
-                f"--l {args.l}",
+                f"--l {args.labeling_time}",
                 f"--seq_err {args.seq_err}",
-                f"--nt_inc_rate {args.nt_inc_rate}",
-                f"--subs_rate {args.subs_rate}",
+                f"--nt_inc_rate {args.nt_inc_prob}",
+                f"--subs_rate {args.subs_prob}",
                 f"--sub_type {args.sub_type}",
                 #f"--seq_depth {args.seq_depth}",
                 f"--bkg_molecules {args.bkg_molecules}",
                 #f"--path_to_tpm {output_dir}/rate_per_gene/tpm_per_gene.tsv",
                 f"--o {mRNA_out_dir}/",
-                f"--treatment '{args.treatment}'"
+                f"--treatment '{treatment}'"
                 ]
 
 

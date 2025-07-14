@@ -16,12 +16,16 @@ def run_cmd(cmd):
     print(f"[Running] {cmd}")
     subprocess.run(cmd, shell=True, check=True)
 
+
+def make_random_suffix(length=5):
+    return ''.join(random.choices(string.ascii_lowercase, k=length))
+
 def extract_sequence_regions(df, read_length):
-    # Ensure converted_positions is a list of ints
     df = df.copy()
-    df['converted_positions'] = df['converted_positions'].apply(
-        lambda x: ast.literal_eval(x) if isinstance(x, str) else x
-    )
+
+    # Ensure converted_positions and incorporated_positions are lists of ints
+    for col in ['converted_positions', 'incorporated_positions']:
+        df[col] = df[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
 
     # Explode read_coordinates
     df_exploded = df.copy()
@@ -43,37 +47,52 @@ def extract_sequence_regions(df, read_length):
         axis=1
     )
 
-    # Count converted positions in upstream/downstream
+    # Count both converted and incorporated positions in upstream/downstream
     def count_and_list_subs(row):
         idx = row['index']
-        converted = df.loc[idx, 'converted_positions']
-        converted = [int(pos) for pos in converted]
-
         read_start = row['read_start']
         read_end = row['read_end']
 
+        # Regions
         upstream_start = read_start
         upstream_end = read_start + read_length
-        upstream_hits = [pos - upstream_start for pos in converted if upstream_start <= pos <= upstream_end]
-
         downstream_start = max(0, read_end - read_length)
         downstream_end = read_end
-        downstream_hits = [pos - downstream_start for pos in converted if downstream_start <= pos <= downstream_end]
+
+        def extract_hits(pos_list):
+            pos_list = [int(pos) for pos in pos_list]
+            upstream_hits = [pos - upstream_start for pos in pos_list if upstream_start <= pos <= upstream_end]
+            downstream_hits = [pos - downstream_start for pos in pos_list if downstream_start <= pos <= downstream_end]
+            return upstream_hits, downstream_hits
+
+        # Converted
+        conv = df.loc[idx, 'converted_positions']
+        conv_upstream_hits, conv_downstream_hits = extract_hits(conv)
+
+        # Incorporated
+        inc = df.loc[idx, 'incorporated_positions']
+        inc_upstream_hits, inc_downstream_hits = extract_hits(inc)
 
         return pd.Series({
-            'n_converted_in_upstream': len(upstream_hits),
-            'converted_positions_upstream': upstream_hits,
-            'n_converted_in_downstream': len(downstream_hits),
-            'converted_positions_downstream': downstream_hits
+            'n_converted_in_upstream': len(conv_upstream_hits),
+            'converted_positions_upstream': conv_upstream_hits,
+            'n_converted_in_downstream': len(conv_downstream_hits),
+            'converted_positions_downstream': conv_downstream_hits,
+            'n_incorporated_in_upstream': len(inc_upstream_hits),
+            'incorporated_positions_upstream': inc_upstream_hits,
+            'n_incorporated_in_downstream': len(inc_downstream_hits),
+            'incorporated_positions_downstream': inc_downstream_hits
         })
 
-    # Apply
     df_exploded[
         ['n_converted_in_upstream', 'converted_positions_upstream',
-         'n_converted_in_downstream', 'converted_positions_downstream']
+         'n_converted_in_downstream', 'converted_positions_downstream',
+         'n_incorporated_in_upstream', 'incorporated_positions_upstream',
+         'n_incorporated_in_downstream', 'incorporated_positions_downstream']
     ] = df_exploded.apply(count_and_list_subs, axis=1)
 
     return df_exploded
+
 
 
 
@@ -87,48 +106,11 @@ def process_sequence(sequence, reverse_comp=False):
     """Process sequence by reversing and complementing if needed."""
     return reverse_complement(sequence) if reverse_comp else sequence
 
-def parse_converted_positions(s):
-    try:
-        # Remove square brackets and split
-        return [int(x) for x in s.strip("[]").split(",") if x.strip().isdigit()]
-    except:
-        return []
 
-def make_random_suffix(length=5):
-    return ''.join(random.choices(string.ascii_lowercase, k=length))
+import gzip
+import random
 
-#def build_read_name(row, which_read, pair_index=0, read_length=100):
-#    converted_positions = parse_converted_positions(row['converted_positions'])
-#    coords = row['read_coordinates'].split(',')
-#
-#    if pair_index < 0 or pair_index >= len(coords):
-#        pair_index = 0 if len(coords) > 0 else None
-
-#    if pair_index is not None:
-#        coord = coords[pair_index]
-#        read_start = int(float(coord.split('-')[0]))
-#        read_end = int(float(coord.split('-')[1]))
-#    else:
-#        read_start, read_end = 0, 0
-
-    # Filter converted positions within either the upstream or downstream window
-#    values_in_range = [
-#        pos - read_start for pos in converted_positions
-#        if (read_start <= pos <= read_start + read_length) or (read_end - read_length <= pos <= read_end)
-#    ]
-#    num_of_conv_bases = len(values_in_range)
-#    values_in_range_str = '-'.join(str(v) for v in values_in_range) if values_in_range else "NA"
-
-#    random_suffix = make_random_suffix()
-#    gene_id = row['transcript_id']
-
-#    return f"{row['molecule_id']}{random_suffix}_{gene_id}" #_{which_read}_nconvbases:{num_of_conv_bases}_posconvbases:{values_in_range_str}"
-
-
-
-
-
-def convert_to_fastq(df, output_prefix, sequencing_type, strandedness,gene_id):
+def convert_to_fastq(df, output_prefix, sequencing_type, strandedness, gene_id):
     def get_sequences(row, which):
         # Always return a list of sequences
         seqs = row[which]
@@ -164,14 +146,27 @@ def convert_to_fastq(df, output_prefix, sequencing_type, strandedness,gene_id):
                 for i, sequence in enumerate(seqs):
                     seq = process_sequence(sequence, reverse_comp=rev)
                     random_suffix = make_random_suffix()
+
+                    # 🔧 Extract both converted and incorporated info
                     if which_read == "upstream":
                         n_converted = row['n_converted_in_upstream']
-                        positions = row['converted_positions_upstream']
+                        converted_positions = row['converted_positions_upstream']
+                        n_incorporated = row['n_incorporated_in_upstream']
+                        incorporated_positions = row['incorporated_positions_upstream']
                     elif which_read == "downstream":
                         n_converted = row['n_converted_in_downstream']
-                        positions = row['converted_positions_downstream']
-                    positions_str = ','.join(map(str, positions))
-                    read_name = f"{row['molecule_id']}{random_suffix}_{gene_id}_subs{n_converted}:{positions_str}"
+                        converted_positions = row['converted_positions_downstream']
+                        n_incorporated = row['n_incorporated_in_downstream']
+                        incorporated_positions = row['incorporated_positions_downstream']
+
+                    conv_str = ','.join(map(str, converted_positions))
+                    inc_str = ','.join(map(str, incorporated_positions))
+
+                    # 🔧 Include both in the read name
+                    read_name = (
+                        f"{row['molecule_id']}{random_suffix}_{gene_id}"
+                        f"_ninc{n_incorporated}:{inc_str}_nsubs{n_converted}:{conv_str}"
+                        )
 
                     quality_scores = "I" * len(seq)
                     f.write(f"{read_name}\n{seq}\n+\n{quality_scores}\n")
@@ -181,11 +176,9 @@ def convert_to_fastq(df, output_prefix, sequencing_type, strandedness,gene_id):
         output_file_r2 = f"{output_prefix}_R2.fastq.gz"
         with gzip.open(output_file_r1, 'wt') as f1, gzip.open(output_file_r2, 'wt') as f2:
             for _, row in df.iterrows():
-                # Always get lists for both
                 upstream_seqs = get_sequences(row, 'read_upstream')
                 downstream_seqs = get_sequences(row, 'read_downstream')
                 n_pairs = min(len(upstream_seqs), len(downstream_seqs))
-                # If lists are different lengths, only use as many as both have
 
                 for i in range(n_pairs):
                     if strandedness == "rf":
@@ -212,29 +205,45 @@ def convert_to_fastq(df, output_prefix, sequencing_type, strandedness,gene_id):
 
                     random_suffix = make_random_suffix()
 
+                    # 🔧 Extract converted + incorporated for R1
                     if which_read_r1 == "upstream":
                         n_conv_r1 = row['n_converted_in_upstream']
-                        pos_r1 = row['converted_positions_upstream']
+                        pos_conv_r1 = row['converted_positions_upstream']
+                        n_inc_r1 = row['n_incorporated_in_upstream']
+                        pos_inc_r1 = row['incorporated_positions_upstream']
                     else:
                         n_conv_r1 = row['n_converted_in_downstream']
-                        pos_r1 = row['converted_positions_downstream']
-                        pos_r1_str = ','.join(map(str, pos_r1))
-                        read_name_r1 = f"{row['molecule_id']}{random_suffix}_{gene_id}_subs{n_conv_r1}:{pos_r1_str}"
-                        
+                        pos_conv_r1 = row['converted_positions_downstream']
+                        n_inc_r1 = row['n_incorporated_in_downstream']
+                        pos_inc_r1 = row['incorporated_positions_downstream']
+
+                    # 🔧 Extract converted + incorporated for R2
                     if which_read_r2 == "upstream":
                         n_conv_r2 = row['n_converted_in_upstream']
-                        pos_r2 = row['converted_positions_upstream']
+                        pos_conv_r2 = row['converted_positions_upstream']
+                        n_inc_r2 = row['n_incorporated_in_upstream']
+                        pos_inc_r2 = row['incorporated_positions_upstream']
                     else:
                         n_conv_r2 = row['n_converted_in_downstream']
-                        pos_r2 = row['converted_positions_downstream']
-                    pos_r2_str = ','.join(map(str, pos_r2))
-                    read_name_r2 = f"{row['molecule_id']}{random_suffix}_{gene_id}_subs{n_conv_r2}:{pos_r2_str}"
-                    
+                        pos_conv_r2 = row['converted_positions_downstream']
+                        n_inc_r2 = row['n_incorporated_in_downstream']
+                        pos_inc_r2 = row['incorporated_positions_downstream']
+
+                    read_name_r1 = (f"{row['molecule_id']}{random_suffix}_{gene_id}"
+                        f"_ninc{n_inc_r1}:{','.join(map(str, pos_inc_r1))}"
+                        f"_nsubs{n_conv_r1}:{','.join(map(str, pos_conv_r1))}"
+                        )
+                    read_name_r2 = (f"{row['molecule_id']}{random_suffix}_{gene_id}"
+                        f"_ninc{n_inc_r2}:{','.join(map(str, pos_inc_r2))}"
+                        f"_nsubs{n_conv_r2}:{','.join(map(str, pos_conv_r2))}"
+                        )
+
                     quality_scores_r1 = "I" * len(seq_r1)
                     quality_scores_r2 = "I" * len(seq_r2)
 
                     f1.write(f"{read_name_r1}\n{seq_r1}\n+\n{quality_scores_r1}\n")
                     f2.write(f"{read_name_r2}\n{seq_r2}\n+\n{quality_scores_r2}\n")
+
 
 
 

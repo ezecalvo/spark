@@ -119,7 +119,7 @@ SPARK can be run in full or as specific modules to change specific parameters of
 
 Rather than simulating random sequences, SPARK simulates reads from a user-provided reference genome to create more representative nucleotide content across reads. This mode analyzes sequence and isoform features (see figure) for all annotated genes in the provided genome, using the longest isoform per gene. Hierarchical clustering is then performed using these features to define groups of isoforms with similar metrics. The output is a tsv file per gene, where each row is a feature (exon or intron) and the last column contains the sequence for that feature.
 
-
+![](figures/gene_clustering.png)
 
 ### Step 2: Elongation Rates. 
 
@@ -127,19 +127,16 @@ Rather than simulating random sequences, SPARK simulates reads from a user-provi
 
 RNAPII elongation rates are likely not static across a gene. Additionally, any changes in elongation rats likely occur continuously, rather than in a step-wise fashion. To simulate the variability in elongation rates across the gene sequence, this mode will assign an elongation rate (in the range specified by ```--elong_rate_range```) to each nucleotide of the isoform. Elongation rates within this range are assigned to regions whose length is chosen from the range specified by ```--region_size_range```. Within each region, the elongation rate (in nt/min) changes linearly from the rate at the first nucleotide to the rate at the last nucleotide in that region. For example, in a 10nt region that starts at 1 nt/min and ends at 2nt/min, nucleotide #1 = 1 nt/min, #2 = 1.22, #3 = 1.33, ... until #10 at 2 nt/min.  
 
+![](figures/rates_per_position.png)
 
 To simulate step-wise changes in elongation rates, users can specify ```--flat_rates``` to ensure all the nucleotides in a region have the same elongation rate. To simulate a single elongation region across the entire gene, users can specify ```--gene_level```.  Specifying both ```--flat_rates``` and ```--gene_level``` will create a single, non-varying elongation rate across the entire gene.
 
-
-
--->
-
+![](figures/rates_flat_genelevel.png)
 
 Finally, there is evidence that RNAPII can pause throughout a gene. Pauses in RNAPII elongation can be added at random nucleotides by specifying ```--pause_occur_probability```. Specifically, this sets a probability of each region having a pausing event. The timing of the pause is specified by ```--pause_time```, which is a range of time in minutes (default = [0.1,0.5]). 
 
 
-
-
+![](figures/rates_with_pausev2.png)
 
 #### Output files
 Two output files per gene will be created in a new directory named _rate_per_gene_ to record the ground truth of elongation rates. The _RatesandTraversalTimes_ files contain the elongation rate per nucleotide, while the _VariableElongationRateRegions_ files contain the elongation rate variability information per region (see the [ground truth](#ground-truth) section for details of file format).
@@ -157,7 +154,7 @@ First, there are two transcriptional conditions that can be simulated using ```-
 
 (2)  A native context assuming steady-state transcription, in which RNAPII are already distributed across the gene body when labeling begins. (including ```--drb```)
 
-
+![](figures/mRNA_generation.png)
 
 Second, SPARK simulates temporally-resolved nascent RNA sequencing using metabolic labeling. There are a number of parameters to determine the labeling probability, detection, and effciency. The labeling time is specified by ```--labeling_time```, which also determines how far  RNAPII elongates after its start point at the start of the labeling period. Specifically, the labeling time is used to calculate a total elongation distance considering the cumulative elongation rates across the gene. During this “time”, the probability that a labeled nucleotide is _in-silico_ incorporated into nascent molecules is specified by ```--nt_inc_prob```. Once incorporated, the probability that these labeled nucleotides undergo nucleoside re-encoding is specified by ```--subs_prob```. The nature of this re-encoding is specified by ```--sub_type```. For example, iodoacetamide or TFEA-induced re-encoding of 4sU results in a T-to-C conversion, so ```--sub_type T,C``` would simulate eSLAM-seq or enriched TimeLapse-seq experiments. To simulate a nascent RNA experiment without nucleoside labeling, users can specify ```--nt_inc_prob 0```.
 
@@ -221,19 +218,24 @@ Three types of ground truth information are stored to use in downstream analyses
 The read names contain information about the gene that the read belongs to, and the number and position of converted nucleotides in the read. For example:
 
 ```
-@2LOX927M95Izmqeh_ENSG00000229327_subs3:74,29,95
+@2LOX927M95Izmqeh_ENSG00000229327_ninc2:2,3_nsubs2:2,3
 Read ID: 2LOX927M95Izmqeh
 Gene ID: ENSG00000229327
-Number of substitutions: 3
-Position of the substitutions in the read: 74,29,95
+Number of modified nucleotides in the read: 2
+Position of the modified nucleotides in the read: 2,3
+Number of substitutions: 2
+Position of the substitutions in the read: 2,3
 ```
 ```
-@2LOX927M95Izaouk_ENSG00000229327_subs0:
+@2LOX927M95Ifdjie_ENSG00000229327_ninc3:17,21,90_nsubs1:21:
 Read ID: 2LOX927M95Izaouk
 Gene ID: ENSG00000229327
-Number of substitutions: 0
-Position of the substitutions in the read:
+Number of modified nucleotides in the read: 3
+Position of the modified nucleotides in the read: 17,21,90
+Number of substitutions: 1
+Position of the substitutions in the read: 21
 ```
 
 Each read's ID begins with a capitalized section; reads coming from the same mRNA molecule share this capitalized ID prefix. A lowercase suffix will then differentiate individual reads. For read pairs, both reads will have identical IDs.
+
 

@@ -18,10 +18,8 @@ def getDNAseq(dna_sequence):
 
 # find the nt position reached up to the labeling duration, given a nt startsite
 def findStopnt(nt_traversal_time_df, labeling_duration, startsite):
-    
     #initialize cumulative time object
     cumulative_time_elapsed = 0
-    
     # initialize variables to store the penultimate loop values for when labeling duration is exceeded
     prev_nt_coord = None
     prev_cumulative_time_elapsed = 0
@@ -31,7 +29,6 @@ def findStopnt(nt_traversal_time_df, labeling_duration, startsite):
     
     # find the point at which 5 minutes will have elapsed (but not exceed labeling duration)
     for nt in range(startsite_nt_coord - 1, len(nt_traversal_time_df)):
-        
         # start by storing the current nucleotide coordinate and cumulative time before adding the new one
         prev_nt_coord = nt + 1 # for 1-based indexing
         prev_cumulative_time_elapsed = cumulative_time_elapsed 
@@ -98,21 +95,23 @@ def convert_base(read, nt_incorporation_rate, nt_conversion_rate, start_site, st
     num_bases_incorporated = int(math.ceil(len(pos) * nt_incorporation_rate_to_use))
     
     #Randomly choose which ones are incorporated
-    pos_conv = random.sample(pos, num_bases_incorporated)
+    pos_inc = random.sample(pos, num_bases_incorporated)
     
     #Determine what percent of those will actually be converted
     conversion_fraction = random.uniform(nt_conversion_rate[0], nt_conversion_rate[1])
-    num_bases_converted = int(math.floor(len(pos_conv) * conversion_fraction))
+    num_bases_converted = int(math.floor(len(pos_inc) * conversion_fraction))
     
     #Choose randomly which of the incorporated bases are converted
-    pos_to_convert = random.sample(pos_conv, num_bases_converted)
+    pos_to_convert = random.sample(pos_inc, num_bases_converted)
     
     #Convert to list and apply the conversion
     conv_read = list(read)
     for i in pos_to_convert:
         conv_read[start_site + i] = to_base #->>>>>WHY IS THIS ADDING TO STARTSITE?
     
-    return ''.join(conv_read), nt_incorporation_rate, [start_site + i for i in pos_conv]
+    #return ''.join(conv_read), nt_incorporation_rate, [start_site + i for i in pos_conv]
+    return ''.join(conv_read), nt_incorporation_rate_to_use, [start_site + i for i in pos_to_convert], [start_site + i for i in pos_inc]
+
 
 
 
@@ -288,7 +287,7 @@ if __name__ == "__main__":
         read = dna_sequence[1:int(stop_label_pos)]
 
         # convert positions
-        converted_read, percent_sub, converted_positions = convert_base(read, nt_incorporation_rate, sub_rate_percent_range, int(start_label_pos), int(stop_label_pos),from_base,to_base)
+        converted_read, percent_sub, converted_positions,incorporated_positions = convert_base(read, nt_incorporation_rate, sub_rate_percent_range, int(start_label_pos), int(stop_label_pos),from_base,to_base)
         
         #bg_mutated_read, percentage_bg_mutations, mutated_bg_positions = mutate_bg(converted_read, list(map(float, args.b.split(','))), int(starts_5eU_pos), int(stop_site_5eU))
         seq_err_read, percentage_seq_err, seq_err_positions = add_seq_errs(converted_read, list(map(float, args.seq_err.split(','))))
@@ -298,7 +297,7 @@ if __name__ == "__main__":
         molecule_id=id_generator()
 
 
-        row_data = [initiation, molecule_id,strand,sub_rate_percent_range, start_label_pos, stop_label_pos, converted_positions, percentage_seq_err,seq_err_positions,seq_err_read]
+        row_data = [initiation, molecule_id,strand,sub_rate_percent_range, start_label_pos, stop_label_pos, converted_positions, incorporated_positions,percentage_seq_err,seq_err_positions,seq_err_read]
         #row_data.columns = ["initiation_time", "sub_rate_percent_range", 'start_label_pos','stop_label_pos', 'converted_positions', 'percentage_seq_err','seq_err_positions','full_molecule_sequence']
 
         # Add the row_data to the data_list
@@ -325,6 +324,7 @@ if __name__ == "__main__":
             start_label_pos=0
             stop_label_pos=0
             converted_positions='NA'
+            incorporated_positions='NA'
             percentage_seq_err=percentage_seq_err
             seq_err_positions=seq_err_positions
             seq_err_read=seq_err_read
@@ -332,7 +332,7 @@ if __name__ == "__main__":
 
     # Convert to DataFrame with column names
     df_for_export = pd.DataFrame(data_list, columns=["initiation_time", 'molecule_id','strand',"sub_rate_percent_range", 'start_label_pos',
-                                      'stop_label_pos','converted_positions', 'percentage_seq_err',
+                                      'stop_label_pos','converted_positions','incorporated_positions', 'percentage_seq_err',
                                       'seq_err_positions', 'full_molecule_sequence'])
 
 
