@@ -54,6 +54,7 @@ general arguments:
   --mode {fullpipeline,tsvgeneration,rates_per_region,labeling_strategy,seq_tech}
                         pipeline step to run (default: None)
   -o O                  output directory (default: ./)
+  --seed SEED           random seed for reproducibility (default: None)
 
 tsv generation:
   --gtf GTF             genome annotation file (default: None)
@@ -68,16 +69,20 @@ tsv generation:
 
 rates per region:
   --region_size_range REGION_SIZE_RANGE
-                        range of region sizes (default: 100,5000)
+                        range of region sizes to split the gene into (default: None)
+  --num_regions NUM_REGIONS
+                        desired number of regions to split the gene into (default: None)
   --elong_rate_range ELONG_RATE_RANGE
                         range of elongation rates (default: 500,5000)
   --pause_occur_probability PAUSE_OCCUR_PROBABILITY
-probability of having a pausing event across the isoform (default: 0)
+                        probability of having a pausing event across the isoform (default: 0)
+  --pause_time PAUSE_TIME
+                        length of the pausing event in minutes (default: 0.1,0.5)
   --flat_rates          all nucleotides have the same elongation rate (default: False)
-  --gene_level          get only one region across the gene (default: False)
 
 labeling strategy:
-  --labeling_time L                 labeling time in minutes (default: 15)
+  --labeling_time LABELING_TIME
+                        labeling time in minutes (default: 15)
   --seq_err SEQ_ERR     sequencing error rate (default: 0.0001,0.0002)
   --nt_inc_prob NT_INC_PROB
                         Comma-separated range of nucleotide incorporation probability (default: 0.09,0.1)
@@ -85,9 +90,8 @@ labeling strategy:
                         Comma-separated range of nucleotide substitution proportions (default: 0.95,1)
   --sub_type SUB_TYPE   substitution type (default: T,T)
   --bkg_molecules BKG_MOLECULES
-                        proportion of molecules that are derived from non-labeled RNA (background; default: 0)
-  --drb DRB
-                        DRB treatment experiment for transcription synchronization (default: no DRB)
+                        proportion of molecules that are derived from non-labeled RNA (default: 0)
+  --drb                 DRB treatment experiment for transcription synchronization (default: False)
 
 sequencing strategy:
   --seq_tech {longread,shortread}
@@ -110,7 +114,7 @@ sequencing strategy:
 spark.py --mode fullpipeline -o ./pipeline_out/  --n 1000 --gtf GRCh38.95.gtf --genome_fasta GRCh38.fa --sub_type T,C --seq_tech shortread --s rf  --seq_type PE
 ```
 
-SPARK can be run in full or as specific modules to change specific parameters of the simulation while keeping others constant.
+SPARK can be run in full or as specific modules to change specific parameters of the simulation while keeping others constant. User can choose to input a seed to replicate the randomly assigned values (e.g. elongation rates) across runs.
 
 
 ### Step 1: Gene Selection
@@ -129,14 +133,14 @@ RNAPII elongation rates are likely not static across a gene. Additionally, any c
 
 ![](figures/rates_per_position.png)
 
-To simulate step-wise changes in elongation rates, users can specify ```--flat_rates``` to ensure all the nucleotides in a region have the same elongation rate. To simulate a single elongation region across the entire gene, users can specify ```--gene_level```.  Specifying both ```--flat_rates``` and ```--gene_level``` will create a single, non-varying elongation rate across the entire gene.
+To simulate step-wise changes in elongation rates, users can specify ```--flat_rates``` to ensure all the nucleotides in a region have the same elongation rate. To simulate a single elongation region across the entire gene, users can specify  the number of regions with a the same elongation rate per nucleotide using ```--num_regions```.  Specifying both ```--flat_rates``` and ```--num_regions 1``` will create a single, non-varying elongation rate across the entire gene.
+
 
 ![](figures/rates_flat_genelevel.png)
 
 Finally, there is evidence that RNAPII can pause throughout a gene. Pauses in RNAPII elongation can be added at random nucleotides by specifying ```--pause_occur_probability```. Specifically, this sets a probability of each region having a pausing event. The timing of the pause is specified by ```--pause_time```, which is a range of time in minutes (default = [0.1,0.5]). 
 
-
-![](figures/rates_with_pausev2.png)
+![](figures/rates_with_pause.png)
 
 #### Output files
 Two output files per gene will be created in a new directory named _rate_per_gene_ to record the ground truth of elongation rates. The _RatesandTraversalTimes_ files contain the elongation rate per nucleotide, while the _VariableElongationRateRegions_ files contain the elongation rate variability information per region (see the [ground truth](#ground-truth) section for details of file format).
@@ -237,5 +241,4 @@ Position of the substitutions in the read: 21
 ```
 
 Each read's ID begins with a capitalized section; reads coming from the same mRNA molecule share this capitalized ID prefix. A lowercase suffix will then differentiate individual reads. For read pairs, both reads will have identical IDs.
-
 
