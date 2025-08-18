@@ -1,5 +1,6 @@
 import argparse
 import subprocess
+import random
 import os
 import glob
 import numpy as np
@@ -26,6 +27,8 @@ def main():
     # General arguments
     group_general_arguments.add_argument("--mode", required=True, choices=["fullpipeline", "tsvgeneration", "rates_per_region", "labeling_strategy", "seq_tech"], help="pipeline step to run")
     group_general_arguments.add_argument("-o", type=str, default="./", help="output directory")
+    group_general_arguments.add_argument("--seed", type=int, help="random seed for reproducibility")
+
 
     # Arguments for tsvgeneration
     group_tsv_generation.add_argument("--gtf", type=str, help="genome annotation file")
@@ -36,12 +39,12 @@ def main():
     group_tsv_generation.add_argument("--n", type=int, default=120, help="number of genes")
 
     # Arguments for rates_per_region
-    group_rates_per_region.add_argument("--region_size_range", default="100,5000", help="range of region sizes")
+    group_rates_per_region.add_argument("--region_size_range", type=str, help="range of region sizes to split the gene into")
+    group_rates_per_region.add_argument('--num_regions', type=int, help='desired number of regions to split the gene into')
     group_rates_per_region.add_argument("--elong_rate_range", default="500,5000", help="range of elongation rates")
     group_rates_per_region.add_argument("--pause_occur_probability", default=0, type=float, help="probability of having a pausing event across the isoform")
     group_rates_per_region.add_argument('--pause_time',default="0.1,0.5", type=str, help="length of the pausing event in minutes", required=False)
     group_rates_per_region.add_argument("--flat_rates", action="store_true", help="all nucleotides have the same elongation rate")
-    group_rates_per_region.add_argument("--gene_level", action="store_true", help="get only one region across the gene")
 
     # Arguments for labeling_strategy
     # group_labeling_strategy.add_argument("--labelingmode", type=str, default="monolabel", choices=["monolabel", "kineticbarcoding"], help="Labeling mode to use")
@@ -65,6 +68,17 @@ def main():
     args = parser.parse_args()
     output_dir = args.o.rstrip("/")
 
+    # Set random seed if specified
+    if args.seed is not None:
+        np.random.seed(args.seed)
+        random.seed(args.seed)
+
+    #both the number and size of regions were specified but they are mutually exclusive
+    region_size_range_provided = args.region_size_range is not None
+    num_regions_provided = args.num_regions is not None
+    
+    if region_size_range_provided and num_regions_provided:
+        raise ValueError("Specify only one of --region_size_range or --num_regions, not both.")
 
     # Print errors if non-compatible options are specified
     #Seq type+strand
@@ -90,7 +104,6 @@ def main():
         print("Error: --pause_occur_probability must be between 0 and 1")
         sys.exit(1)
 
-
     if args.mode in ["fullpipeline", "tsvgeneration"]:
         cmd_seq = [
             f"Rscript {os.path.join(SCRIPT_DIR, 'seq_and_clustering.R')}",
@@ -102,7 +115,12 @@ def main():
             f"-n {args.n}"
         ]
         if args.protein_coding_only:
-                cmd_seq.append("--protein_coding_only")
+            cmd_seq.append("--protein_coding_only")
+        if args.seed:
+            cmd_seq += ['--seed', args.seed]
+
+        np.random.seed(args.seed)
+        random.seed(args.seed)
         run_cmd(" ".join(cmd_seq))
 
     if args.mode in ["fullpipeline", "rates_per_region"]:
@@ -115,7 +133,6 @@ def main():
             cmd_rates = [
                 f"python {os.path.join(SCRIPT_DIR, 'rates_per_region.py')}",
                 f"--tsv {tsv}",
-                f"--region_size_range {args.region_size_range}",
                 f"--elong_rate_range {args.elong_rate_range}",
                 f"--pause_time {args.pause_time}",
                 f"--pause_occur_probability {args.pause_occur_probability}",
@@ -123,8 +140,16 @@ def main():
             ]
             if args.flat_rates:
                 cmd_rates.append("--flat_rates")
-            if args.gene_level:
-                cmd_rates.append("--gene_level")
+            if args.seed:
+                cmd_rates += ['--seed', args.seed]
+            #if args.gene_level:
+            #    cmd_rates.append("--gene_level")
+            if region_size_range_provided:
+                cmd_rates += ['--region_size_range', args.region_size_range]
+            elif num_regions_provided:
+                cmd_rates += ['--num_regions', str(args.num_regions)]
+            else:
+                raise ValueError("You must provide either --region_size_range or --num_regions")
 
             run_cmd(" ".join(cmd_rates))
 
@@ -188,23 +213,8 @@ def main():
                 f"--o {mRNA_out_dir}/",
                 f"--treatment '{treatment}'"
                 ]
-
-
-            # else:
-            #     cmd_label = [
-            #         f"python {os.path.join(SCRIPT_DIR, 'mRNA_generator_kinetic_barcoding.py')}",
-            #         f"--region_file {region_file}",
-            #         f"--nt_file {nt_file}",
-            #         f"--l {args.l}",
-            #         f"--seq_err {args.seq_err}",
-            #         f"--nt_inc_rate {args.nt_inc_rate}",
-            #         f"--subs_5eU {args.subs_5eU}",
-            #         f"--subs_6sG {args.subs_6sG}",
-            #         f"--subs_4sU {args.subs_4sU}",
-            #         f"--reads {args.reads}",
-            #         f"--o {mRNA_out_dir}/",
-            #         f"--treatment '{args.treatment}'"
-            #     ]
+            if args.seed:
+                cmd_label += ['--seed', args.seed]
 
             run_cmd(" ".join(cmd_label))
 
@@ -222,8 +232,6 @@ def main():
         os.makedirs(libraries_out_dir, exist_ok=True)
         today_str = datetime.today().strftime("%Y%m%d")
 
-
-
         for tsv in tsv_files:
             gene_id = os.path.basename(tsv).split("_")[0]
             print(f"Running seq_tech for gene: {gene_id}")
@@ -238,10 +246,12 @@ def main():
                     f"--tpm_upper_limit {tpm_upper_lim}",
                     f"-o {reads_out_dir}/"
                 ]
+                if args.seed:
+                    cmd_seqtech += ['--seed', args.seed]
+
                 run_cmd(" ".join(cmd_seqtech))
                 output_filename = f"{args.seq_tech}_{args.seq_type}_{today_str}.fastq.gz"
-                cmd_catlibraries = [f'cat "{reads_out_dir}"/*_{args.seq_type}.fastq.gz > "{libraries_out_dir}/{output_filename}"']
-                run_cmd(" ".join(cmd_catlibraries))
+                
 
 
             else:
@@ -258,20 +268,31 @@ def main():
                     f"--s {args.s}",
                     f"--o {output_dir}/"
                 ]
+                if args.seed:
+                    cmd_seqtech += ['--seed', args.seed]
 
                 run_cmd(" ".join(cmd_seqtech))
                 #Concatenate libraries
                 output_filename_R1 = f"{args.seq_tech}_{args.seq_type}_{today_str}_R1.fastq.gz"
                 output_filename_R2 = f"{args.seq_tech}_{args.seq_type}_{today_str}_R2.fastq.gz"
 
-                cmd_catlibraries_R1 = [f'cat "{reads_out_dir}"/*_R1.fastq.gz > "{libraries_out_dir}/{output_filename_R1}"']
-                run_cmd(" ".join(cmd_catlibraries_R1))
-                cmd_catlibraries_R2 = [f'cat "{reads_out_dir}"/*_R2.fastq.gz > "{libraries_out_dir}/{output_filename_R2}"']
-                run_cmd(" ".join(cmd_catlibraries_R2))
+        if args.seq_tech == "longread":
+            cmd_catlibraries = [f'cat "{reads_out_dir}"/*_{args.seq_type}.fastq.gz > "{libraries_out_dir}/{output_filename}"']
+            run_cmd(" ".join(cmd_catlibraries))
+        else:
+            cmd_catlibraries_R1 = [f'cat "{reads_out_dir}"/*_R1.fastq.gz > "{libraries_out_dir}/{output_filename_R1}"']
+            run_cmd(" ".join(cmd_catlibraries_R1))
+            cmd_catlibraries_R2 = [f'cat "{reads_out_dir}"/*_R2.fastq.gz > "{libraries_out_dir}/{output_filename_R2}"']
+            run_cmd(" ".join(cmd_catlibraries_R2))
+        #Remove reads after concatenation
+        cmd_clean_indiv_reads = [f'/bin/rm "{reads_out_dir}"/*fastq']
+        run_cmd(" ".join(cmd_clean_indiv_reads))
+
 
         
 
 if __name__ == "__main__":
     main()
+
 
 

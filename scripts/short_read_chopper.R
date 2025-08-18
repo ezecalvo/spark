@@ -21,7 +21,9 @@ option_list = list(
   make_option(c("--tpm_upper_limit"), type="numeric", default=200, 
               help="sequencing depth", metavar="numeric"),
   make_option(c("-o", "--dir_out"), type="character", default=".", 
-              help="dir out to create temp files", metavar="character")
+              help="dir out to create temp files", metavar="character"),
+  make_option(c("--seed"), type="numeric", default=NULL,
+              help="seed for randomization")
 )
 
 
@@ -32,6 +34,11 @@ opt = parse_args(opt_parser)
 if (is.null(opt$tsv)){
   stop("path to tsv with simulated mRNAs is missing", call.=FALSE)
 }
+
+if (!is.null(opt$seed)){
+  set.seed(opt$seed)
+}
+
 
 setDTthreads(threads = opt$threads)
 insert_size <- opt$insert_size
@@ -47,6 +54,8 @@ file_importer <- function(file){
   full_reads$sequence_length <- nchar(full_reads$full_molecule_sequence)
   return(full_reads)
 }
+
+
 
 #Chopper function
 get_reads <- function(lengths, eta_val = 200, insert_size, transcript_id) {
@@ -89,10 +98,28 @@ get_reads <- function(lengths, eta_val = 200, insert_size, transcript_id) {
     read_start = unlist(starts),
     read_end = unlist(ends)
   )
+  
+  # Create first row from 1 to the first read_start
+  first_row <- data.frame(
+    transcript_id = fragments$transcript_id[1],
+    read_start = 1,
+    read_end = fragments$read_start[1]
+  )
+  
+  # Create last row from the last read_end to the value of lengths
+  last_row <- data.frame(
+    transcript_id = fragments$transcript_id[nrow(fragments)],
+    read_start = fragments$read_end[nrow(fragments)],
+    read_end = lengths
+  )
+  
+  # Combine all together
+  fragments <- rbind(first_row, fragments, last_row)
   fragments$length <- fragments$read_end - fragments$read_start
   
   # Filter by insert size
-  fragments <- fragments[fragments$length >= insert_size[1] & fragments$length <= insert_size[2], ]
+  fragments$size_selection <- 'filtered_out'
+  fragments[fragments$length >= insert_size[1] & fragments$length <= insert_size[2], 'size_selection'] <- 'passed_size_selection'
   fragments$length <- NULL  # Optional: drop if not needed
   
   return(fragments)
@@ -105,14 +132,22 @@ random_string_gen <- function(n = 5000) {
 }
 
 full_reads <- file_importer(file)
-#full_reads$full_molecule_sequence <- NULL
-reads_list <- lapply(seq_len(nrow(full_reads)), function(i) {
+#Get gene that was simulated
+gene_id <- sub(".*/(ENSG[0-9]+)_.*", "\\1", file)
+
+list_with_all_fragments <- lapply(seq_len(nrow(full_reads)), function(i) {
   get_reads(lengths = full_reads$sequence_length[i],
             insert_size = insert_size,
             transcript_id = full_reads$transcript_id[i])
 })
 
-reads_list <- dplyr::bind_rows(reads_list,.id = 'transcript_id')
+reads_list <- dplyr::bind_rows(list_with_all_fragments,.id = 'transcript_id')
+
+#Keep all fragments before filtering by their length
+reads_list_all_fragments <- reads_list
+#Keep fragments that are long enough
+reads_list <- reads_list[reads_list$size_selection=='passed_size_selection',]
+
 
 if (nrow(reads_list)>10){ #Some genes have really short mRNAs and will get filtered out during size selection
   reads_list$transcript_id <- as.numeric(reads_list$transcript_id)
@@ -133,48 +168,60 @@ if (nrow(reads_list)>10){ #Some genes have really short mRNAs and will get filte
   
   reads_list$read_start <- as.integer(reads_list$read_start)
   reads_list$read_end <- as.integer(reads_list$read_end)
+  
+  #Get a ground truth that belongs to fragmented and size selected fragments (but not mapped)
+  all_positions_selected <- unlist(mapply(seq, reads_list$read_start, reads_list$read_end))
+  freq_table_selected <- as.data.table(table(all_positions_selected))
+  setnames(freq_table_selected, c("position", "frequency"))
+  freq_table_selected[, position := as.integer(as.character(position))]
+  
+  dir_ground_truth <- paste(opt$dir_out,'/ground_truth_after_size_selection',sep = '')
+  dir.create(dir_ground_truth, showWarnings = FALSE, recursive = TRUE)
+  path_for_file <- paste(dir_ground_truth,'/',gene_id,'.tsv.gz',sep = '')
+  fwrite(freq_table_selected,path_for_file,sep = '\t',col.names = T,row.names = F,quote = F,compress = 'gzip')
+  
+  
   reads_list <- reads_list %>%
     dplyr::mutate(read_coordinate = paste0(read_start, "-", read_end)) %>%
     dplyr::group_by(transcript_id) %>%
     dplyr::summarise(read_coordinates = paste(read_coordinate, collapse = ","), .groups = "drop")
-  
+
   full_reads <- merge(full_reads,reads_list,by='transcript_id')
   
+  #### Get ground truth for all the fragments before fragmentation and size selection
+  #Calculate the ratio for all fragments/filtered fragments
+  #ratio_total_passed <- nrow(reads_list_all_fragments)/nrow(reads_list_all_fragments[reads_list_all_fragments$size_selection=='passed_size_selection',])
+  #Sample the total reads based on the ratio and the assigned gene TPM
+  all_fragments_to_get <- reads_to_get#*ratio_total_passed
   
-  #Get the id of the simualted gene
-  gene_id <- sub(".*/(ENSG[0-9]+)_.*", "\\1", file) #Get gene that was simulated
+  #Sample multiple times to smooth the distribution
+  all_sampling <- data.frame()
+  for (j in 1:100){
+  if (nrow(reads_list_all_fragments)>=all_fragments_to_get){
+    reads_list_all_fragments_sampled <- dplyr::sample_n(reads_list_all_fragments,size=all_fragments_to_get,replace = F) #No replacement
+  }else{
+    sampled_reads <- dplyr::sample_n(reads_list_all_fragments,size=all_fragments_to_get-nrow(reads_list_all_fragments),replace = T) #With replacement for the reads that are missing
+    reads_list_all_fragments_sampled <- rbind(reads_list_all_fragments,sampled_reads)
+  }
   
-  # #Get number and position of the substitutions
-  # full_reads <- full_reads %>%
-  #   dplyr::rowwise() %>%
-  #   dplyr::mutate(
-  #     # Convert string to numeric vector
-  #     converted_pos_numeric = list(as.numeric(strsplit(gsub("\\[|\\]", "", converted_positions), ",")[[1]])),
-  #     # Extract positions in range
-  #     values_in_range_vec = list(
-  #       if (length(converted_pos_numeric) > 0) {
-  #         converted_pos_numeric[converted_pos_numeric >= read_start & converted_pos_numeric <= read_end]
-  #       } else {
-  #         numeric(0)
-  #       }),
-  #     # Adjust and collapse if there are multiple subs positions
-  #     values_in_range = if (length(values_in_range_vec) > 0) {
-  #       paste(values_in_range_vec - read_start, collapse = "-")
-  #     } else {
-  #       NA_character_
-  #     },
-  #     num_of_conv_bases = length(values_in_range_vec)# Count how many positions fall within read_start and read_end
-  #   ) %>%
-  #   ungroup()
+  #Get ground truth for the number of mRNAs that are going into this -> used for edge effect correction
+  all_positions <- unlist(mapply(seq, reads_list_all_fragments_sampled$read_start, reads_list_all_fragments_sampled$read_end))
+  freq_table <- as.data.table(table(all_positions))
+  setnames(freq_table, c("position", "frequency"))
+  freq_table[, position := as.integer(as.character(position))]
+  all_sampling <- rbind(all_sampling,freq_table)
+  }
+  final_freqs <- all_sampling %>% dplyr::group_by(position) %>% dplyr::reframe(frequency=mean(frequency))
+  final_freqs <- final_freqs[-nrow(final_freqs),]#Remove last nucleotide which will always be noisy
   
-  #Name reads
-  #molecule_ids <- paste0(full_reads$molecule_id, replicate(nrow(full_reads), paste0(sample(letters, 5, replace = TRUE), collapse = "")))
-  #full_reads$molecule_id <- paste(molecule_ids,'_',gene_id,'_','nconvbases:',full_reads$num_of_conv_bases,'_','posconvbases:',full_reads$values_in_range,sep = '')
+  dir_ground_truth <- paste(opt$dir_out,'/ground_truth_pre_size_selection',sep = '')
+  dir.create(dir_ground_truth, showWarnings = FALSE, recursive = TRUE)
+  path_for_file <- paste(dir_ground_truth,'/',gene_id,'.tsv.gz',sep = '')
+  fwrite(final_freqs,path_for_file,sep = '\t',col.names = T,row.names = F,quote = F,compress = 'gzip')
   
   #Export
   temp_dir <- paste(opt$dir_out,'/temp/mRNAs_with_fragments',sep = '')
   dir.create(temp_dir, showWarnings = FALSE, recursive = TRUE)
-  
   path_for_file <- paste(temp_dir,'/',gene_id,'_fragments.tsv',sep = '')
   fwrite(full_reads,path_for_file,sep = '\t',col.names = T,row.names = F,quote = F)
 }

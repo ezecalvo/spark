@@ -30,7 +30,9 @@ option_list = list(
   make_option(c("-c", "--n_gene_clusters"), type="numeric", default="6", 
               help="Number of gene clusters to get", metavar="numeric"),
   make_option(c("-n", "--number_of_genes"), type="numeric", default="120", 
-              help="Number of total genes to simulate", metavar="numeric")
+              help="Number of total genes to simulate", metavar="numeric"),
+  make_option(c("--seed"), type="numeric", default=NULL,
+              help="seed for randomization")
 )
 
 opt_parser = OptionParser(option_list=option_list)
@@ -41,6 +43,10 @@ if (is.null(opt$gtf)){
 }
 if (is.null(opt$genome_fasta)){
   stop("Genome fasta file is missing", call.=FALSE)
+}
+
+if (!is.null(opt$seed)){
+  set.seed(opt$seed)
 }
 
 #Set number of threads for data table
