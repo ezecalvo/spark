@@ -74,8 +74,8 @@ rates per region:
                         desired number of regions to split the gene into (default: None)
   --elong_rate_range ELONG_RATE_RANGE
                         range of elongation rates (default: 500,5000)
-  --pause_occur_probability PAUSE_OCCUR_PROBABILITY
-                        probability of having a pausing event across the isoform (default: 0)
+  --num_pauses num_pauses
+                        number of pauses across the gene (default: 0)
   --pause_time PAUSE_TIME
                         length of the pausing event in minutes (default: 0.1,0.5)
   --flat_rates          all nucleotides have the same elongation rate (default: False)
