@@ -42,7 +42,7 @@ def main():
     group_rates_per_region.add_argument("--region_size_range", type=str, help="range of region sizes to split the gene into")
     group_rates_per_region.add_argument('--num_regions', type=int, help='desired number of regions to split the gene into')
     group_rates_per_region.add_argument("--elong_rate_range", default="500,5000", help="range of elongation rates")
-    group_rates_per_region.add_argument("--pause_occur_probability", default=0, type=float, help="probability of having a pausing event across the isoform")
+    group_rates_per_region.add_argument('--num_pauses', type=int, help='number of pause regions across the gene')
     group_rates_per_region.add_argument('--pause_time',default="0.1,0.5", type=str, help="length of the pausing event in minutes", required=False)
     group_rates_per_region.add_argument("--flat_rates", action="store_true", help="all nucleotides have the same elongation rate")
 
@@ -100,9 +100,9 @@ def main():
         sys.exit(1)
 
     #Not a probability for pausing event
-    if not (0.0 <= args.pause_occur_probability <= 1.0):
-        print("Error: --pause_occur_probability must be between 0 and 1")
-        sys.exit(1)
+    #if not (0.0 <= args.pause_occur_probability <= 1.0):
+    #    print("Error: --pause_occur_probability must be between 0 and 1")
+    #    sys.exit(1)
 
     if args.mode in ["fullpipeline", "tsvgeneration"]:
         cmd_seq = [
@@ -135,7 +135,7 @@ def main():
                 f"--tsv {tsv}",
                 f"--elong_rate_range {args.elong_rate_range}",
                 f"--pause_time {args.pause_time}",
-                f"--pause_occur_probability {args.pause_occur_probability}",
+                f"--num_pauses {args.num_pauses}",
                 f"--o {output_dir}"
             ]
             if args.flat_rates:
@@ -285,7 +285,7 @@ def main():
             cmd_catlibraries_R2 = [f'cat "{reads_out_dir}"/*_R2.fastq.gz > "{libraries_out_dir}/{output_filename_R2}"']
             run_cmd(" ".join(cmd_catlibraries_R2))
         #Remove reads after concatenation
-        cmd_clean_indiv_reads = [f'/bin/rm "{reads_out_dir}"/*fastq']
+        cmd_clean_indiv_reads = [f'/bin/rm "{reads_out_dir}"/*fastq*']
         run_cmd(" ".join(cmd_clean_indiv_reads))
 
 
@@ -293,6 +293,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 

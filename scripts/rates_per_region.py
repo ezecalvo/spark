@@ -13,8 +13,8 @@ def getDNAseq(dna_sequence):
 def defineElongRateRegions(input_df_basename, df, dna_sequence,
                            min_length, max_length,
                            min_rate, max_rate,
-                           pause_rate, pause_chance,
-                           num_regions=None):
+                           pause_rate, pause_chance=None,
+                           num_regions=None, num_pauses=None):
 
     region_data = []
     gene_length = len(dna_sequence)
@@ -30,6 +30,7 @@ def defineElongRateRegions(input_df_basename, df, dna_sequence,
 
     rate_initial = round(random.uniform(min_rate, max_rate), 4)
 
+    # --- Generate region lengths (same as before) ---
     if num_regions is not None:
         lengths = []
         total = 0
@@ -49,35 +50,56 @@ def defineElongRateRegions(input_df_basename, df, dna_sequence,
             lengths.append(l)
             total += l
 
+    # --- Decide exact nucleotide positions for pauses ---
+    pause_positions = set()
+    if num_pauses is not None:
+        if num_pauses > gene_length:
+            raise ValueError("num_pauses cannot exceed gene length (nt)")
+        pause_positions = set(random.sample(range(1, gene_length + 1), num_pauses))
+
+    # --- Build regions ---
     for region_length in lengths:
         end_coord = start_coord + region_length - 1
-        sequence = dna_sequence[start_coord - 1:end_coord]
 
-        if random.random() < pause_chance and start_coord > 1 and region_length > 1:
-            pause_rate_initial = pause_rate
-            pause_rate_final = pause_rate
-            rate_change_per_nt = 0
-            time_to_traverse = region_length / pause_rate
-
-            region_data.append((chromosome, abs_start, abs_end, start_coord, end_coord, strand,
-                                pause_rate_initial, pause_rate_final, rate_change_per_nt, time_to_traverse, sequence))
-        else:
-            flat_rates = args.flat_rates
-            if flat_rates:
-                rate_final = rate_initial
+        pos = start_coord
+        while pos <= end_coord:
+            if pos in pause_positions:
+                # make a 1-nt pause region
+                sequence = dna_sequence[pos - 1:pos]
+                time_to_traverse = 1 / pause_rate
+                region_data.append((chromosome, abs_start, abs_end,
+                                    pos, pos, strand,
+                                    pause_rate, pause_rate, 0,
+                                    time_to_traverse, sequence))
+                pos += 1
             else:
-                rate_final = round(random.uniform(min_rate, max_rate), 4)
+                # extend a "normal" subregion until next pause or end
+                next_pause = min([p for p in pause_positions if p >= pos], default=end_coord + 1)
+                sub_end = min(end_coord, next_pause - 1)
+                sub_len = sub_end - pos + 1
+                sequence = dna_sequence[pos - 1:sub_end]
 
-            rate_change_per_nt = (rate_final - rate_initial) / region_length
-            rate_final = round(rate_final - rate_change_per_nt, 4)
-            time_to_traverse = region_length / ((rate_final + rate_initial) / 2)
+                flat_rates = args.flat_rates
+                if flat_rates:
+                    rate_final = rate_initial
+                else:
+                    rate_final = round(random.uniform(min_rate, max_rate), 4)
 
-            region_data.append((chromosome, abs_start, abs_end, start_coord, end_coord, strand,
-                                rate_initial, rate_final, rate_change_per_nt, time_to_traverse, sequence))
+                rate_change_per_nt = (rate_final - rate_initial) / sub_len
+                rate_final = round(rate_final - rate_change_per_nt, 4)
+                time_to_traverse = sub_len / ((rate_final + rate_initial) / 2)
 
-            rate_initial = rate_final if not flat_rates else round(random.uniform(min_rate, max_rate), 4)
+                region_data.append((chromosome, abs_start, abs_end,
+                                    pos, sub_end, strand,
+                                    rate_initial, rate_final,
+                                    rate_change_per_nt, time_to_traverse,
+                                    sequence))
+
+                rate_initial = rate_final if not flat_rates else round(random.uniform(min_rate, max_rate), 4)
+                pos = sub_end + 1
 
         start_coord = end_coord + 1
+
 
     columns = ["chromosome", 'absolute_start', 'absolute_end', "region_start_coord", "region_end_coord",
                'strand', "rate_initial", "rate_final", "rate_change_per_nt", "time_to_traverse", "sequence"]
@@ -135,14 +157,19 @@ if __name__ == "__main__":
     parser.add_argument('--num_regions', type=int, help='desired number of regions to split the gene into')
 
     parser.add_argument('--elong_rate_range', type=str, default='500,5000', help='range of elongation rates (nt/min)')
-    parser.add_argument('--pause_occur_probability', type=float, default=0, help='probability of pausing event')
+    parser.add_argument('--num_pauses', type=int, help='number of pause regions across the gene')
     parser.add_argument('--pause_time', type=str, default="0.1,0.5", help='length of pausing in minutes')
     parser.add_argument('--tsv', type=str, default='tmp.tsv', help='input TSV file')
     parser.add_argument('--o', type=str, default='./', help='output path')
     parser.add_argument('--flat_rates', action='store_true', help='make rates constant within regions')
-    parser.add_argument('--gene_level', action='store_true', help='use one region per gene')
+    #parser.add_argument('--gene_level', action='store_true', help='use one region per gene')
+    parser.add_argument("--seed", type=int, help="random seed for reproducibility")
 
     args = parser.parse_args()
+
+    # Set random seed if specified
+    if args.seed is not None:
+        random.seed(args.seed)
 
     #Parse region size or number
     # Convert 'None' string to real None
@@ -176,14 +203,15 @@ if __name__ == "__main__":
     dna_sequence = getDNAseq(df.sequence)
 
     df_regions = defineElongRateRegions(base_filename, df, dna_sequence,
-                                        min_len, max_len,
-                                        elong_rate_range_min, elong_rate_range_max,
-                                        pause_elong_rate, args.pause_occur_probability,
-                                        num_regions=num_regions)
+                                    min_len, max_len,
+                                    elong_rate_range_min, elong_rate_range_max,
+                                    pause_elong_rate,
+                                    pause_chance=args.pause_occur_probability if args.num_pauses is None else None,
+                                    num_regions=num_regions,
+                                    num_pauses=args.num_pauses)
 
     saveGTF(df_regions, output_filename_regions)
 
     output_filename_nttraversaltime = os.path.join(rate_per_gene_dir, f"{base_filename}_RatesandTraversalTimes.gtf")
     df_nt = ntTraversalTime(df_regions)
     saveGTF(df_nt, output_filename_nttraversaltime)
-
