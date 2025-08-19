@@ -42,7 +42,7 @@ def main():
     group_rates_per_region.add_argument("--region_size_range", type=str, help="range of region sizes to split the gene into")
     group_rates_per_region.add_argument('--num_regions', type=int, help='desired number of regions to split the gene into')
     group_rates_per_region.add_argument("--elong_rate_range", default="500,5000", help="range of elongation rates")
-    group_rates_per_region.add_argument('--num_pauses', type=int, help='number of pause regions across the gene')
+    group_rates_per_region.add_argument('--num_pauses', type=int, help='number of pauses across the gene',default=0)
     group_rates_per_region.add_argument('--pause_time',default="0.1,0.5", type=str, help="length of the pausing event in minutes", required=False)
     group_rates_per_region.add_argument("--flat_rates", action="store_true", help="all nucleotides have the same elongation rate")
 
