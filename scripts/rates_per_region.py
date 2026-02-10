@@ -3,6 +3,7 @@ import random
 import argparse
 import math
 import os
+import hashlib
 
 def saveGTF(input_df, output_filename):
     """Saves a DataFrame to a GTF-like tab-separated file."""
@@ -122,11 +123,10 @@ def defineElongRateRegions(input_df_basename, df, dna_sequence,
             sequence = dna_sequence[pos - 1:end_coord]
             sub_len = end_coord - pos + 1
 
-            # If the whole gene is a single region without pauses, force a flat rate.
-            if num_regions == 1 and not all_pauses:
-                rate_final = rate_initial
-            else:
-                rate_final = rate_initial if args.flat_rates else round(random.uniform(min_rate, max_rate), 4)
+            # --- MODIFIED LOGIC START ---
+            # Removed the condition that forced flat rates if num_regions == 1
+            rate_final = rate_initial if args.flat_rates else round(random.uniform(min_rate, max_rate), 4)
+            # --- MODIFIED LOGIC END ---
             
             # Corrected calculation for rate change per nucleotide
             rate_change_per_nt = (rate_final - rate_initial) / (sub_len - 1) if sub_len > 1 else 0
@@ -223,9 +223,21 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Set random seed if specified
+    # ------------------------------------------------------------
+    #extract the filename first so we can use it to create a unique seed.
+    basename = os.path.basename(args.tsv)
+    base_filename = basename.split('.')[0]
+
+
     if args.seed is not None:
-        random.seed(args.seed)
+    	filename_bytes = basename.encode('utf-8')
+    	hasher = hashlib.sha256(filename_bytes)
+    	file_hash_int = int(hasher.hexdigest(), 16)
+    	file_hash_int = file_hash_int % (2**32)
+    	unique_seed = args.seed + file_hash_int
+    	random.seed(unique_seed)
+    
+    # ------------------------------------------------------------
 
     # Parse region size or number
     if args.region_size_range and args.region_size_range != 'None':
@@ -242,6 +254,8 @@ if __name__ == "__main__":
 
     # Get TSS pause duration
     promoter_pause_duration_min, promoter_pause_duration_max = map(float, args.promoter_pause_duration.split(','))
+    
+    # Random calls now use the unique seed
     TSS_pause_duration = random.uniform(promoter_pause_duration_min, promoter_pause_duration_max)
 
     # Get other parameters
@@ -254,8 +268,7 @@ if __name__ == "__main__":
     df = pd.read_csv(args.tsv, sep='\t', comment='#')
     df.columns = ['chr', 'start', 'end', 'gene_id', 'feature', 'position', 'strand', 'sequence']
 
-    basename = os.path.basename(args.tsv)
-    base_filename = basename.split('.')[0]
+    # (Previous basename extraction lines were moved up, so we just set the dirs here)
     rate_per_gene_dir = os.path.join(args.o, "rate_per_gene")
     os.makedirs(rate_per_gene_dir, exist_ok=True)
 
@@ -291,5 +304,3 @@ if __name__ == "__main__":
     saveGTF(df_nt, output_filename_nttraversaltime)
 
     print(f"Processing complete. Output files are in: {rate_per_gene_dir}")
-
-

@@ -60,10 +60,10 @@ The SPARK pipeline was designed to be run either as a single continuous pipeline
 ```
 usage: spark.py
 options:
--h, --help            show this help message and exit
+  -h, --help            show this help message and exit
 
 general arguments:
-  --mode {fullpipeline,tsvgeneration,rates_per_region,mRNAgeneration,seq_tech}
+  --mode {fullpipeline,gene_selection,rates_per_region,mRNAgeneration,seq_tech}
                         pipeline step to run (default: None)
   -o O                  output directory (default: ./)
   --seed SEED           random seed for reproducibility (default: None)
@@ -114,6 +114,10 @@ mRNA generation:
   --bkg_molecules BKG_MOLECULES
                         proportion of mRNA molecules that are derived from non-labeled RNA (default: 0)
   --drb                 DRB treatment experiment for transcription synchronization (default: False)
+  --intron_half_life INTRON_HALF_LIFE
+                        range of intron half life in minutes for the introns to simulate spliicng (default: 0.8,1.2)
+  --nosplicing          If set, skip all splicing simulation steps (default: False)
+  --mRNA_coordinates    If set, output a TSV with the coordinates of the surviving features (exons + retained introns) (default: False)
 
 sequencing strategy:
   --seq_tech {longread,shortread}

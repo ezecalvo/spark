@@ -6,6 +6,7 @@ import glob
 import sys
 import numpy as np
 import pandas as pd
+import gzip
 from datetime import datetime
 from multiprocessing import Pool
 
@@ -13,14 +14,87 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Define args as a global variable, to be assigned in main()
 args = None 
 
-# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-# ALL WORKER FUNCTIONS ARE NOW DEFINED AT THE TOP LEVEL OF THE SCRIPT
-# +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 def run_cmd(cmd):
     """Executes a command and checks for errors."""
     print(f"[Running] {cmd}")
     subprocess.run(cmd, shell=True, check=True)
+
+def count_reads(fastq_file):
+    """Counts reads in a gzipped fastq file using system wc for speed."""
+    if not os.path.exists(fastq_file): return 0
+    try:
+        # Use subprocess to stream gzip content to wc -l. 
+        # This is much faster than iterating in Python for large files.
+        ps = subprocess.Popen(f"gzip -dc {fastq_file} | wc -l", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stdout, _ = ps.communicate()
+        lines = int(stdout.strip())
+        return lines // 4
+    except Exception as e:
+        print(f"Error counting reads in {fastq_file}: {e}")
+        return 0
+
+def downsample_library(r1_file, r2_file, target_depth, seed):
+    """
+    Subsamples GZIP FASTQ files to a target depth using probability sampling.
+    Keeps R1 and R2 synchronized if PE.
+    """
+    current_reads = count_reads(r1_file)
+    if current_reads <= target_depth:
+        print(f"[Info] Total reads ({current_reads}) <= target depth ({target_depth}). No downsampling needed.")
+        return
+
+    print(f"[Downsampling] Reducing from {current_reads} to approx {target_depth} reads...")
+    
+    # Calculate selection probability
+    frac = target_depth / current_reads
+    
+    # Define temporary output filenames
+    r1_out = r1_file.replace(".fastq.gz", ".tmp.fastq.gz")
+    r2_out = r2_file.replace(".fastq.gz", ".tmp.fastq.gz") if r2_file else None
+    
+    # Initialize Random Generator
+    rng = random.Random(seed) if seed is not None else random.Random()
+    
+    try:
+        with gzip.open(r1_file, 'rt') as f1_in, gzip.open(r1_out, 'wt') as f1_out:
+            if r2_file:
+                # --- Paired End Processing ---
+                with gzip.open(r2_file, 'rt') as f2_in, gzip.open(r2_out, 'wt') as f2_out:
+                    while True:
+                        # Read 4 lines (one record) from R1
+                        r1_rec = [f1_in.readline() for _ in range(4)]
+                        if not r1_rec[0]: break # EOF
+                        
+                        # Read 4 lines (one record) from R2
+                        r2_rec = [f2_in.readline() for _ in range(4)]
+                        
+                        # Decide whether to keep the pair
+                        if rng.random() < frac:
+                            for line in r1_rec: f1_out.write(line)
+                            for line in r2_rec: f2_out.write(line)
+            else:
+                # --- Single End Processing ---
+                while True:
+                    rec = [f1_in.readline() for _ in range(4)]
+                    if not rec[0]: break # EOF
+                    
+                    if rng.random() < frac:
+                        for line in rec: f1_out.write(line)
+
+        # Overwrite original files with subsampled files
+        os.replace(r1_out, r1_file)
+        if r2_file:
+            os.replace(r2_out, r2_file)
+        
+        print(f"[Downsampling] Complete. Files updated.")
+
+    except Exception as e:
+        print(f"[Error] Downsampling failed: {e}")
+        # Clean up temps if they exist
+        if os.path.exists(r1_out): os.remove(r1_out)
+        if r2_file and os.path.exists(r2_out): os.remove(r2_out)
+
 
 def process_rates_file(tsv):
     """Worker for the rates_per_region step."""
@@ -44,7 +118,7 @@ def process_mrna_file(region_file):
     """Worker for the mRNAgeneration step."""
     output_dir = args.o.rstrip("/")
     dir_region_files = f"{output_dir}/rate_per_gene/"
-    mRNA_out_dir = os.path.join(output_dir, "mRNA")
+    premRNA_out_dir = os.path.join(output_dir, "pre-mRNA")
     
     gene_id = os.path.basename(region_file).split("_")[0]
     if not gene_id.startswith("ENSG"): gene_id = "ENSG" + gene_id
@@ -61,12 +135,41 @@ def process_mrna_file(region_file):
         f"--seq_err {args.seq_err}", f"--nt_inc_rate {args.nt_inc_prob}",
         f"--subs_rate {args.subs_prob}", f"--labeling_base {args.labeling_base}",
         f"--bkg_molecules {args.bkg_molecules}", f"--initi_rate {args.initi_rate}",
-        f"--o {mRNA_out_dir}/"
+        f"--o {premRNA_out_dir}/"
     ]
     if args.seed: cmd_label.extend(['--seed', str(args.seed)])
     if args.drb: cmd_label.append('--drb')
     if args.sub_base: cmd_label.extend(['--sub_base', args.sub_base])
+    if args.nosplicing: cmd_label.append("--nosplicing") 
     run_cmd(" ".join(cmd_label))
+
+
+def process_splicing(mrna_file):
+    script_path = os.path.join(SCRIPT_DIR, 'spark_spliceosome.py')
+    splice_out_dir = os.path.join(args.o.rstrip('/'), 'mRNA')  # Where spliced files will go
+    halflife_out_dir = os.path.join(args.o.rstrip('/'), 'intron_half_lives')
+
+    os.makedirs(splice_out_dir, exist_ok=True)
+    os.makedirs(halflife_out_dir, exist_ok=True)
+
+    base = os.path.splitext(os.path.basename(mrna_file))[0].split('.')[0]
+
+    # Build the command to run the splicing step.
+    cmd = [
+        f"python {script_path}",
+        f"--mRNA_df {mrna_file}",
+        f"--intron_half_life {args.intron_half_life}",
+        f"--o {args.o.rstrip('/')}"
+    ]
+    if args.seed:
+        cmd += ["--seed", str(args.seed)]
+    if args.nosplicing:
+        cmd += ["--nosplicing"]
+    if args.mRNA_coordinates:
+        cmd += ["--mRNA_coordinates"]
+
+    run_cmd(" ".join(cmd))
+
 
 def mrna_to_proseq(tsv):
     """Worker for PRO-seq step 1."""
@@ -98,7 +201,7 @@ def mnetseq_to_fastq(tsv):
     cmd = [f"python {os.path.join(SCRIPT_DIR, 'fastq_generator_mnetseq.py')}",
            f"--input_df {tsv}", f"--insert_size {args.insert_size}", f"--read_length {args.read_length}",
            f"--seq_type {args.seq_type}", f"--threads 1", f"--seq_depth {args.seq_depth}",
-           f"--tpm_lower_limit {tpm_lower}", f"--tpm_upper_limit {tpm_upper}", f"--s {args.s}", f"--o {args.o.rstrip('/')}/"]
+           f"--tpm_lower_limit {tpm_lower}", f"--tpm_upper_limit {tpm_upper}", f"--s {args.s}", f"--o {args.o.rstrip('/')}/",f"--bkg_molecules {args.bkg_molecules}"]
     if args.seed: cmd.extend(['--seed', str(args.seed)])
     run_cmd(" ".join(cmd))
 
@@ -109,12 +212,12 @@ def nascent_to_fastq(tsv):
     if args.seq_tech == "longread":
         cmd = [f"python {os.path.join(SCRIPT_DIR, 'fastq_generator_long_read.py')}",
                f"--input_df {tsv}", f"--seq_type {args.seq_type}", f"--seq_depth {args.seq_depth}",
-               f"--tpm_lower_limit {tpm_lower}", f"--tpm_upper_limit {tpm_upper}", f"-o {output_dir}"]
+               f"--tpm_lower_limit {tpm_lower}", f"--tpm_upper_limit {tpm_upper}", f"-o {output_dir}",f"--bkg_molecules {args.bkg_molecules}"]
     else: # shortread
         cmd = [f"python {os.path.join(SCRIPT_DIR, 'fastq_generator_short_read.py')}",
                f"--input_df {tsv}", f"--insert_size {args.insert_size}", f"--read_length {args.read_length}",
                f"--seq_type {args.seq_type}", f"--threads 1", f"--seq_depth {args.seq_depth}",
-               f"--tpm_lower_limit {tpm_lower}", f"--tpm_upper_limit {tpm_upper}", f"--s {args.s}", f"--o {output_dir}/"]
+               f"--tpm_lower_limit {tpm_lower}", f"--tpm_upper_limit {tpm_upper}", f"--s {args.s}", f"--o {output_dir}/", f"--experiment_time {args.experiment_time}",f"--bkg_molecules {args.bkg_molecules}"]
         if args.fragments: cmd.append('--fragments')
     if args.seed: cmd.extend(['--seed', str(args.seed)])
 
@@ -142,7 +245,7 @@ def main():
     group_mRNAgeneration = parser.add_argument_group('mRNA generation')
     group_seq_tech = parser.add_argument_group('sequencing strategy')
 
-    group_general_arguments.add_argument("--mode", required=True, choices=["fullpipeline", "tsvgeneration", "rates_per_region", "mRNAgeneration", "seq_tech"], help="pipeline step to run")
+    group_general_arguments.add_argument("--mode", required=True, choices=["fullpipeline", "gene_selection", "rates_per_region", "mRNAgeneration", "seq_tech"], help="pipeline step to run")
     group_general_arguments.add_argument("-o", type=str, default="./", help="output directory")
     group_general_arguments.add_argument("--seed", type=int, help="random seed for reproducibility")
     group_general_arguments.add_argument("--experiment_type", required=True, choices=["nascentrnapd", "proseq","ttseq","mnetseq"], help="type of experiment to simulate")
@@ -172,6 +275,9 @@ def main():
     group_mRNAgeneration.add_argument('--sub_base', type=str, choices=["A", "C", "T", "G"], help='Specify the identity of the base after conversion', required=False)
     group_mRNAgeneration.add_argument('--bkg_molecules', type=float, default=0,help='proportion of mRNA molecules that are derived from non-labeled RNA')
     group_mRNAgeneration.add_argument("--drb", action="store_true", help="DRB treatment experiment for transcription synchronization")
+    group_mRNAgeneration.add_argument('--intron_half_life', default='0.8,1.2',help="range of intron half life in minutes for the introns to simulate spliicng")
+    group_mRNAgeneration.add_argument("--nosplicing", action="store_true", help="If set, skip all splicing simulation steps")
+    group_mRNAgeneration.add_argument("--mRNA_coordinates", action="store_true", help="If set, output a TSV with the coordinates of the surviving features (exons + retained introns)")
 
     group_seq_tech.add_argument("--seq_tech", choices=["longread", "shortread"], default="shortread", help="sequencing technology")
     group_seq_tech.add_argument("--seq_type", choices=["RNA", "cDNA", "SE", "PE"], default="SE",help="sequencing type")
@@ -205,7 +311,7 @@ def main():
 
 
     # --- Pipeline Steps ---
-    if args.mode in ["fullpipeline", "tsvgeneration"]:
+    if args.mode in ["fullpipeline", "gene_selection"]:
         cmd_seq = [
             f"Rscript {os.path.join(SCRIPT_DIR, 'seq_and_clustering.R')}",
             f"-g {args.gtf}", f"-f {args.genome_fasta}", f"-o {output_dir}/",
@@ -225,11 +331,18 @@ def main():
     if args.mode in ["fullpipeline", "mRNAgeneration"]:
         dir_region_files=f"{output_dir}/rate_per_gene/"
         region_files = sorted(glob.glob(os.path.join(dir_region_files, "*VariableElongationRateRegions.gtf")))
-        mRNA_out_dir = os.path.join(output_dir, "mRNA")
-        os.makedirs(mRNA_out_dir, exist_ok=True)
+        premRNA_out_dir = os.path.join(output_dir, "pre-mRNA")
+        os.makedirs(premRNA_out_dir, exist_ok=True)
         with Pool(processes=args.threads) as pool:
             pool.map(process_mrna_file, region_files)
-    
+
+    if args.mode in ["fullpipeline", "mRNAgeneration"]:
+        premRNA_out_dir = os.path.join(output_dir, "pre-mRNA")
+        transcript_files = sorted(glob.glob(os.path.join(premRNA_out_dir, "*.tsv.gz")))
+        with Pool(processes=args.threads) as pool:
+            pool.map(process_splicing, transcript_files)
+
+
     if args.mode in ["fullpipeline", "seq_tech"]:
         today_str = datetime.today().strftime("%Y%m%d")
         reads_out_dir = os.path.join(output_dir, "reads")
@@ -276,18 +389,32 @@ def main():
             print("No read files found to concatenate. Skipping final step.")
             return
 
+        final_r1_path = None
+        final_r2_path = None
+
         if args.seq_tech == "longread":
             output_filename = f"{args.seq_tech}_{args.experiment_type}_{args.seq_type}_{today_str}.fastq.gz"
-            run_cmd(f'cat "{reads_out_dir}"/*.fastq.gz > "{libraries_out_dir}/{output_filename}"')
+            final_r1_path = os.path.join(libraries_out_dir, output_filename)
+            run_cmd(f'cat "{reads_out_dir}"/*.fastq.gz > "{final_r1_path}"')
+        
         elif args.seq_tech == "shortread" and args.seq_type == "PE":
             output_r1 = f"{args.seq_tech}_{args.experiment_type}_{args.seq_type}_{today_str}_R1.fastq.gz"
             output_r2 = f"{args.seq_tech}_{args.experiment_type}_{args.seq_type}_{today_str}_R2.fastq.gz"
-            run_cmd(f'cat "{reads_out_dir}"/*_R1.fastq.gz > "{libraries_out_dir}/{output_r1}"')
-            run_cmd(f'cat "{reads_out_dir}"/*_R2.fastq.gz > "{libraries_out_dir}/{output_r2}"')
+            final_r1_path = os.path.join(libraries_out_dir, output_r1)
+            final_r2_path = os.path.join(libraries_out_dir, output_r2)
+            
+            run_cmd(f'cat "{reads_out_dir}"/*_R1.fastq.gz > "{final_r1_path}"')
+            run_cmd(f'cat "{reads_out_dir}"/*_R2.fastq.gz > "{final_r2_path}"')
+        
         else: # shortread SE
             output_se = f"{args.seq_tech}_{args.experiment_type}_{args.seq_type}_{today_str}.fastq.gz"
-            run_cmd(f'cat "{reads_out_dir}"/*.fastq.gz > "{libraries_out_dir}/{output_se}"')
+            final_r1_path = os.path.join(libraries_out_dir, output_se)
+            run_cmd(f'cat "{reads_out_dir}"/*.fastq.gz > "{final_r1_path}"')
             
+        # --- Check and Downsample ---
+        if final_r1_path and os.path.exists(final_r1_path):
+             downsample_library(final_r1_path, final_r2_path, args.seq_depth, args.seed)
+        
         run_cmd(f'rm -f "{reads_out_dir}"/*fastq*')
         temp_dir = f"{output_dir}/temp"
         if os.path.isdir(temp_dir):

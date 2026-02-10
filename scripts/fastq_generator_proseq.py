@@ -292,7 +292,14 @@ if __name__ == "__main__":
         df_mrna = pd.read_csv(mRNA_coordinates_file_path, delimiter="\t")
         df_mrna["sequence_length"] = df_mrna["full_molecule_sequence"].str.len()
         # mean of sequence_length column (divided by 1000)
-        gene_length = df_mrna["sequence_length"].mean() / 1000
+        #gene_length = df_mrna["sequence_length"].mean() / 1000
+
+        #Calculate exon length to scale reads
+        gtf_path = f"{args.o}/gtf/{base_filename}.tsv.gz"
+        df_gtf = pd.read_csv(gtf_path, delimiter="\t")
+        exon_df = df_gtf[df_gtf['feature'] == 'exon'].copy()
+
+        gene_length=exon_df["sequence"].str.len().sum()/1000
 
         # random uniform value between tpm_lower_limit and tpm_upper_limit
         gene_tpm = np.random.uniform(
@@ -329,5 +336,9 @@ if __name__ == "__main__":
             pass
     except FileNotFoundError:
         pass
+
+
+
+
 
 

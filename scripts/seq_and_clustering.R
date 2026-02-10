@@ -81,7 +81,7 @@ getGeneType <- function(gene_annotation){
 
 # Find the longest transcript for the gene
 getLongestTranscript <- function(gencode_data){
-  longest_txpt <- gencode_data[gencode_data$V3=='transcript',] %>% dplyr::group_by(gene_id) %>% dplyr::mutate(transcript_length=V5-V4) %>% dplyr::filter(transcript_length==max(transcript_length))
+  longest_txpt <- gencode_data[gencode_data$V3=='transcript',] %>% dplyr::group_by(gene_id) %>% dplyr::mutate(transcript_length=V5-V4) %>% dplyr::filter(transcript_length==max(transcript_length)) %>% dplyr::slice(1)#Some genes will have transcripts from the same length, this ensures there's only one
   return(longest_txpt)
   
 }
@@ -168,7 +168,8 @@ getLongestTxptSequence <- function(longest_txpt,exon_coordinates,intron_coordina
   #coordinates_transcripts_for_bedtools$end <- coordinates_transcripts_for_bedtools$end-1
   
   exon_coordinates$id <- paste(exon_coordinates$id,'exon',exon_coordinates$score,sep = '_')
-  intron_coordinates$id <- paste(intron_coordinates$id,'intron',intron_coordinates$score,sep = '_')
+  if (nrow(intron_coordinates)>0){
+  intron_coordinates$id <- paste(intron_coordinates$id,'intron',intron_coordinates$score,sep = '_')}
   
   #Merge all coordinates to run bedtools only once (parsing happens downstream)
   all_coordinates <- rbind(coordinates_transcripts_for_bedtools,exon_coordinates,intron_coordinates)
@@ -366,6 +367,7 @@ gtf_generator <- function(path_to_fastatsv,sampled_genes,exon_coordinates,intron
   
   #Import and parse
   seq_per_feature <- fread(path_to_parsed_file,header = F)
+  
   seq_per_feature <- seq_per_feature %>% 
     tidyr::separate(V1, into = c("transcript_id", "feature", "position"), sep = "_") %>%
     dplyr::mutate(position = gsub("\\([+-]\\)", "", position))
@@ -376,7 +378,7 @@ gtf_generator <- function(path_to_fastatsv,sampled_genes,exon_coordinates,intron
   
   #Add coordinate info per feature
   exon_coordinates$feature <- 'exon'
-  intron_coordinates$feature <- 'intron'
+  if (nrow(intron_coordinates>0)){intron_coordinates$feature <- 'intron'}
   all_features <- rbind(exon_coordinates,intron_coordinates)
   colnames(all_features)[c(4,5)] <- c('transcript_id','position')
   #Add gene id for export

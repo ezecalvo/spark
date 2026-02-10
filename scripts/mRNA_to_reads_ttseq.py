@@ -9,13 +9,11 @@ import string
 import ast
 import numpy as np
 
-
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def run_cmd(cmd):
     print(f"[Running] {cmd}")
     subprocess.run(cmd, shell=True, check=True)
-
 
 def make_random_suffix(length=5):
     return ''.join(random.choices(string.ascii_lowercase, k=length))
@@ -37,15 +35,50 @@ def extract_sequence_regions(df, read_length):
     df_exploded['read_start'] = coord_split[0].astype(int)
     df_exploded['read_end'] = coord_split[1].astype(int)
 
-    # Extract read sequences
+    # -------------------------------------------------------------------------
+    # FIX: Helper function to extract sequence and apply padding if truncated
+    # -------------------------------------------------------------------------
+    def get_padded_read(row, direction):
+        full_seq = df.loc[row['index'], 'full_molecule_sequence']
+        
+        if direction == 'upstream':
+            # Upstream: Reads from Start -> Forward
+            # If (start + length) > len(seq), Python truncates. We pad the RIGHT side.
+            start = row['read_start']
+            end = start + read_length
+            seq = full_seq[start:end]
+            
+            if len(seq) < read_length:
+                seq += "N" * (read_length - len(seq))
+            return seq
+            
+        elif direction == 'downstream':
+            # Downstream: Reads from End -> Backward
+            # If (end - length) < 0, we clamp to 0. Python truncates. We pad the LEFT side.
+            end = row['read_end']
+            start = end - read_length
+            actual_start = max(0, start)
+            
+            seq = full_seq[actual_start:end]
+            
+            if len(seq) < read_length:
+                padding = "N" * (read_length - len(seq))
+                # If we hit the absolute start (0), we are missing bases on the LEFT (5')
+                if actual_start == 0:
+                    seq = padding + seq
+                else:
+                    # Rare case: if read_end > full_seq length (shouldn't happen with valid coords)
+                    seq += padding
+            return seq
+
+    # Apply the new padded logic
     df_exploded['read_upstream'] = df_exploded.apply(
-        lambda row: df.loc[row['index'], 'full_molecule_sequence'][row['read_start']:row['read_start'] + read_length],
-        axis=1
+        lambda row: get_padded_read(row, 'upstream'), axis=1
     )
     df_exploded['read_downstream'] = df_exploded.apply(
-        lambda row: df.loc[row['index'], 'full_molecule_sequence'][max(0, row['read_end'] - read_length):row['read_end']],
-        axis=1
+        lambda row: get_padded_read(row, 'downstream'), axis=1
     )
+    # -------------------------------------------------------------------------
 
     # Count both converted and incorporated positions in upstream/downstream
     def count_and_list_subs(row):
@@ -118,7 +151,7 @@ def convert_to_fastq(df, output_prefix, sequencing_type, strandedness, read_leng
 
     def get_absolute_coords(read_start, read_end):
         subset = rates_df[
-            (rates_df['nucleotide_coord'] >= read_start) &
+            (rates_df['nucleotide_coord'] >= read_start) & 
             (rates_df['nucleotide_coord'] <= read_end)
         ]
         if not subset.empty:
@@ -219,7 +252,6 @@ def convert_to_fastq(df, output_prefix, sequencing_type, strandedness, read_leng
                             abs_coords_r1 = get_absolute_coords(row['read_start'], row['read_start'] + read_length - 1)
                             abs_coords_r2 = get_absolute_coords(max(0, row['read_end'] - read_length), row['read_end'] - 1)
 
-                    random_suffix = make_random_suffix()
                     read_name_r1 = (
                         f"{row['molecule_id']}{random_suffix}_{abs_coords_r1}"
                     )
@@ -230,7 +262,6 @@ def convert_to_fastq(df, output_prefix, sequencing_type, strandedness, read_leng
                     quality_scores_r2 = "I" * len(seq_r2)
                     f1.write(f"{read_name_r1}\n{seq_r1}\n+\n{quality_scores_r1}\n")
                     f2.write(f"{read_name_r2}\n{seq_r2}\n+\n{quality_scores_r2}\n")
-
 
 
 if __name__ == "__main__":
@@ -251,9 +282,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-
-    args = parser.parse_args()
-
     # Set random seed if specified
     if args.seed is not None:
         random.seed(args.seed)
@@ -270,7 +298,7 @@ if __name__ == "__main__":
             f"-o {args.o}"
         ]
     if args.seed:
-        cmd_chop += ['--seed', args.seed]
+        cmd_chop += ['--seed', str(args.seed)]
 
     run_cmd(" ".join(cmd_chop))
 
@@ -281,10 +309,10 @@ if __name__ == "__main__":
     # Construct the output filename
     output_prefix = f"{args.o}/reads/{base_filename}"
 
-#Import the chopped coordinates from R
+    # Import the chopped coordinates from R
     chopped_coordinates_file_path = f"{args.o}/temp/mRNAs_with_fragments/{base_filename}_fragments.tsv"
 
-    try:#Avoid errors if the reads were not generated (because the mRNAs were too short)
+    try: # Avoid errors if the reads were not generated (because the mRNAs were too short)
         df = pd.read_csv(chopped_coordinates_file_path, delimiter="\t")
         for col in ['converted_positions', 'incorporated_positions']:
             df[col] = df[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else (x if isinstance(x, list) else []))
@@ -292,10 +320,8 @@ if __name__ == "__main__":
         result_df = extract_sequence_regions(df, args.read_length)
         result_df = result_df[(result_df['n_incorporated_in_upstream'] > 0) | (result_df['n_incorporated_in_downstream'] > 0)] #Get molecules with 4sU
 
-
-
-    #Add background if any
-        path_to_BGmRNAs=os.path.join(os.path.dirname(args.o), "mRNA", base_filename + "_background.tsv.gz")
+        # Add background if any
+        path_to_BGmRNAs = os.path.join(os.path.dirname(args.o), "mRNA", base_filename + "_background.tsv.gz")
         if os.path.exists(path_to_BGmRNAs) and os.path.getsize(path_to_BGmRNAs) > 0:
             cmd_chop = [
             f"Rscript {os.path.join(SCRIPT_DIR, 'short_read_chopper_TTseq.R')}",
@@ -306,23 +332,30 @@ if __name__ == "__main__":
             f"-o {args.o}"
             ]
             if args.seed:
-                cmd_chop += ['--seed', args.seed]
+                cmd_chop += ['--seed', str(args.seed)]
 
             run_cmd(" ".join(cmd_chop))
-            #Same as the pulldown samples but skipping the enrichment since these molecules are not labeled
+            # Same as the pulldown samples but skipping the enrichment since these molecules are not labeled
             chopped_coordinates_BG_file_path = f"{args.o}/temp/mRNAs_with_fragments/{base_filename}_background_fragments.tsv"
             df_bg = pd.read_csv(chopped_coordinates_BG_file_path, delimiter="\t")
-            df_bg['molecule_id'] = df_bg['molecule_id'].astype(str) + '_BG_'#Add to the molecule ID that this is a background molecule
+            df_bg['molecule_id'] = df_bg['molecule_id'].astype(str) + '_BG_' # Add to the molecule ID that this is a background molecule
             for col in ['converted_positions', 'incorporated_positions']:
                 df_bg[col] = df_bg[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else (x if isinstance(x, list) else []))
 
             result_df_bg = extract_sequence_regions(df_bg, args.read_length)
             # Calculate number of rows to sample from the background dataframe
             n_bg = int(len(result_df) * args.bkg_molecules)
-            result_df_bg = result_df_bg.sample(n=n_bg, random_state=42)  # Random sampling for reproducibility
+            if n_bg > 0:
+                if len(result_df_bg) >= n_bg:
+                    result_df_bg = result_df_bg.sample(n=n_bg, random_state=42)
+                else:
+                    # If not enough BG fragments, take all and warn/upsample?
+                    # Current logic: take all available
+                    pass
+            
             # Calculate number of rows to sample from the main dataframe
             n_main = int(len(result_df) * (1 - args.bkg_molecules))
-            result_df = result_df.sample(n=n_main, random_state=42)  # Random sampling for reproducibility
+            result_df = result_df.sample(n=n_main, random_state=42) # Random sampling for reproducibility
             # Optionally combine the sampled dataframes
             result_df = pd.concat([result_df, result_df_bg]).reset_index(drop=True)
 
@@ -332,98 +365,96 @@ if __name__ == "__main__":
         min_insert = int(insert_values[0])
         max_insert = int(insert_values[1])
 
-        result_df_pre_selection=result_df
+        result_df_pre_selection = result_df
         
-
-
         result_df = result_df[(result_df['insert_size'] >= min_insert) & (result_df['insert_size'] <= max_insert)]
 
-
-
-
-        #Get fragments to sequence
+        # Get fragments to sequence
         df_mrna = pd.read_csv(args.input_df, delimiter="\t")
         df_mrna["sequence_length"] = df_mrna["full_molecule_sequence"].str.len()
-        # mean of sequence_length column (divided by 1000)
-        gene_length = df_mrna["sequence_length"].mean() / 1000
+        
+        # Calculate exon length to scale reads
+        gtf_path = f"{args.o}/gtf/{base_filename}.tsv.gz"
+        if os.path.exists(gtf_path):
+            df_gtf = pd.read_csv(gtf_path, delimiter="\t")
+            exon_df = df_gtf[df_gtf['feature'] == 'exon'].copy()
+            gene_length = exon_df["sequence"].str.len().sum() / 1000
+        else:
+            gene_length = df_mrna["sequence_length"].mean() / 1000
+
         # random uniform value between tpm_lower_limit and tpm_upper_limit
-        gene_tpm = np.random.uniform(low=int(args.tpm_lower_limit),high=int(args.tpm_upper_limit))
+        gene_tpm = np.random.uniform(low=int(args.tpm_lower_limit), high=int(args.tpm_upper_limit))
         # sequencing depth (divided by 1e6)
         seq_depth = args.seq_depth / 1e6
         # number of fragments for the gene
         reads_to_get = gene_length * gene_tpm * seq_depth
 
-
-        #Get pre size selection ground truth
+        # Get pre size selection ground truth
         if args.fragments:
             # Pre size selection coverage
-            result_df_pre_selection_sampled = result_df_pre_selection.sample(n=int(reads_to_get), replace=True, random_state=None)
-            output_dir_pre = os.path.join(args.o, 'ground_truth_pre_size_selection')
-            os.makedirs(output_dir_pre, exist_ok=True)
-            max_position_pre = result_df_pre_selection_sampled['read_end'].max()
-            coverage_pre = np.zeros(max_position_pre + 2, dtype=int)  # +2 to avoid boundary issues
-            np.add.at(coverage_pre, result_df_pre_selection_sampled['read_start'], 1)
-            np.add.at(coverage_pre, result_df_pre_selection_sampled['read_end'], -1)
-            coverage_pre = np.cumsum(coverage_pre[:-1])
-            coverage_df_pre = pd.DataFrame({'position': np.arange(len(coverage_pre)),'frequency': coverage_pre})
-            coverage_output_path_pre = os.path.join(output_dir_pre, f"{base_filename}.tsv.gz")
-            coverage_df_pre.to_csv(coverage_output_path_pre, sep='\t', index=False, compression='gzip')
+            if not result_df_pre_selection.empty:
+                n_sample_pre = min(len(result_df_pre_selection), int(reads_to_get))
+                # Use replace=True only if we need more reads than exist
+                replace_pre = n_sample_pre > len(result_df_pre_selection)
+                result_df_pre_selection_sampled = result_df_pre_selection.sample(n=int(reads_to_get), replace=True, random_state=None)
+                
+                output_dir_pre = os.path.join(args.o, 'ground_truth_pre_size_selection')
+                os.makedirs(output_dir_pre, exist_ok=True)
+                max_position_pre = result_df_pre_selection_sampled['read_end'].max()
+                if not pd.isna(max_position_pre):
+                    coverage_pre = np.zeros(int(max_position_pre) + 2, dtype=int)
+                    np.add.at(coverage_pre, result_df_pre_selection_sampled['read_start'], 1)
+                    np.add.at(coverage_pre, result_df_pre_selection_sampled['read_end'], -1)
+                    coverage_pre = np.cumsum(coverage_pre[:-1])
+                    coverage_df_pre = pd.DataFrame({'position': np.arange(len(coverage_pre)),'frequency': coverage_pre})
+                    coverage_output_path_pre = os.path.join(output_dir_pre, f"{base_filename}.tsv.gz")
+                    coverage_df_pre.to_csv(coverage_output_path_pre, sep='\t', index=False, compression='gzip')
 
 
-    # Post size selection coverage
-            result_df_sampled = result_df.sample(n=int(reads_to_get), replace=True, random_state=None)
-            output_dir_post = os.path.join(args.o, 'ground_truth_after_size_selection')
-            os.makedirs(output_dir_post, exist_ok=True)
-            max_position_post = result_df_sampled['read_end'].max()
-            coverage_post = np.zeros(max_position_post + 2, dtype=int)  # +2 to avoid boundary issues
-            np.add.at(coverage_post, result_df_sampled['read_start'], 1)
-            np.add.at(coverage_post, result_df_sampled['read_end'], -1)
-            coverage_post = np.cumsum(coverage_post[:-1])
-            coverage_df_post = pd.DataFrame({
-                'position': np.arange(len(coverage_post)),
-                'frequency': coverage_post
-            })
-            coverage_output_path_post = os.path.join(output_dir_post, f"{base_filename}.tsv.gz")
-            coverage_df_post.to_csv(coverage_output_path_post, sep='\t', index=False, compression='gzip')
+            # Post size selection coverage
+            if not result_df.empty:
+                result_df_sampled = result_df.sample(n=int(reads_to_get), replace=True, random_state=None)
+                output_dir_post = os.path.join(args.o, 'ground_truth_after_size_selection')
+                os.makedirs(output_dir_post, exist_ok=True)
+                max_position_post = result_df_sampled['read_end'].max()
+                if not pd.isna(max_position_post):
+                    coverage_post = np.zeros(int(max_position_post) + 2, dtype=int)
+                    np.add.at(coverage_post, result_df_sampled['read_start'], 1)
+                    np.add.at(coverage_post, result_df_sampled['read_end'], -1)
+                    coverage_post = np.cumsum(coverage_post[:-1])
+                    coverage_df_post = pd.DataFrame({
+                        'position': np.arange(len(coverage_post)),
+                        'frequency': coverage_post
+                    })
+                    coverage_output_path_post = os.path.join(output_dir_post, f"{base_filename}.tsv.gz")
+                    coverage_df_post.to_csv(coverage_output_path_post, sep='\t', index=False, compression='gzip')
 
 
-        if len(result_df) >= reads_to_get:
-            result_df = result_df.sample(
-                n=int(reads_to_get), replace=False, random_state=None
-                )
-        else:
-            sampled_reads = result_df.sample(
-                n=int(reads_to_get) - len(result_df), replace=True, random_state=None
-                )
-        # combine original and sampled
-            result_df = pd.concat([result_df, sampled_reads], ignore_index=True)
+        if not result_df.empty:
+            if len(result_df) >= reads_to_get:
+                result_df = result_df.sample(
+                    n=int(reads_to_get), replace=False, random_state=None
+                    )
+            else:
+                sampled_reads = result_df.sample(
+                    n=int(reads_to_get) - len(result_df), replace=True, random_state=None
+                    )
+                # combine original and sampled
+                result_df = pd.concat([result_df, sampled_reads], ignore_index=True)
 
-        rates_for_gene = f"{args.o}/rate_per_gene/{base_filename}_RatesandTraversalTimes.gtf"
-        rates_df = pd.read_csv(rates_for_gene, delimiter="\t")
-        convert_to_fastq(result_df, output_prefix, sequencing_type=args.seq_type, strandedness=args.s,
-                         read_length=args.read_length, rates_df=rates_df)
-        #convert_to_fastq(result_df, output_prefix, sequencing_type=args.seq_type, strandedness=args.s,gene_id=base_filename)
-
-
-
+            rates_for_gene = f"{args.o}/rate_per_gene/{base_filename}_RatesandTraversalTimes.gtf"
+            rates_df = pd.read_csv(rates_for_gene, delimiter="\t")
+            convert_to_fastq(result_df, output_prefix, sequencing_type=args.seq_type, strandedness=args.s,
+                                    read_length=args.read_length, rates_df=rates_df)
 
         try:
-            os.remove(chopped_coordinates_file_path)
+            if os.path.exists(chopped_coordinates_file_path):
+                os.remove(chopped_coordinates_file_path)
             if os.path.exists(path_to_BGmRNAs) and os.path.getsize(path_to_BGmRNAs) > 0:
-                os.remove(chopped_coordinates_BG_file_path)
+                if os.path.exists(chopped_coordinates_BG_file_path):
+                    os.remove(chopped_coordinates_BG_file_path)
         except OSError:
-            pass  # File might have already been removed or never created
+            pass
 
     except FileNotFoundError:
-        pass  # Skip to the next iteration of the loop
-
-
-
-
-
-
-
-
-
-
-
+        pass

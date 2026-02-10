@@ -1,5 +1,3 @@
-
-
 suppressPackageStartupMessages(library(data.table))
 suppressPackageStartupMessages(library(dplyr))
 suppressPackageStartupMessages(library(optparse))
@@ -28,7 +26,6 @@ option_list = list(
               help="to export ground truth", metavar="character")
 )
 
-
 #Parse input
 opt_parser = OptionParser(option_list=option_list)
 opt = parse_args(opt_parser)
@@ -41,7 +38,6 @@ if (!is.null(opt$seed)){
   set.seed(opt$seed)
 }
 
-
 setDTthreads(threads = opt$threads)
 insert_size <- opt$insert_size
 insert_size_split <- strsplit(insert_size, ",")[[1]]
@@ -52,25 +48,16 @@ file <- opt$tsv
 #File importing and formating
 file_importer <- function(file){
   full_reads <- data.table::fread(file=file, sep = '\t', header = T, stringsAsFactors = FALSE)
+  # Ensure transcript_id matches the row index logic used later
   full_reads$transcript_id <- as.numeric(1:nrow(full_reads))
   full_reads$sequence_length <- nchar(full_reads$full_molecule_sequence)
   return(full_reads)
 }
 
-
-
 #Chopper function
 get_reads <- function(lengths, eta_val = 200, insert_size, transcript_id) {
   
   eta_val <- mean(c(insert_size[1],insert_size[2]))
-  # Select a fragment from each transcript, size select, and return the start and end positions
-  # Inputs: 
-  #   lengths - the length of the transcript
-  #   eta_val - eta parameter for Weibull distribution
-  #   insert_size - vector of length two with the lower and upper bounds for valid fragments
-  #   transcript_id - the transcript ID to assign to each resulting fragment
-  # Output:
-  #   A data frame with transcript_id, read_start, and read_end
   
   deltas <- log10(lengths)
   ns_minus_1 <- pmax(round(lengths / eta_val / gamma(1 / deltas + 1)) - 1, 0)
@@ -139,16 +126,11 @@ full_reads <- file_importer(file)
 #Get gene that was simulated
 gene_id <- sub(".*/(ENSG[0-9]+(?:_background)?)(?:\\.tsv\\.gz)$", "\\1", file)
 
-
-
-
 list_with_all_fragments <- lapply(seq_len(nrow(full_reads)), function(i) {
   get_reads(lengths = full_reads$sequence_length[i],
             insert_size = insert_size,
             transcript_id = full_reads$transcript_id[i])
 })
-
-
 
 reads_list <- dplyr::bind_rows(list_with_all_fragments,.id = 'transcript_id')
 
@@ -164,83 +146,75 @@ if (nrow(reads_list)>10){ #Some genes have really short mRNAs and will get filte
   gene_length <- mean(full_reads$sequence_length)/1000
   gene_tpm <- runif(n=1, min=as.integer(opt$tpm_lower_limit), max=as.integer(opt$tpm_upper_limit))
   seq_depth <- opt$seq_depth/10^6
-  #Get the number of fragments for the gene. We are using TPM as a way to normalize genes for the same library. Thus, we decided not to use a denominator when calculating counts since all genes would have the same denominator.
-  reads_to_get <- gene_length*gene_tpm*seq_depth
   
-  #Sample if necessary -> Now in the python script
-  # if (nrow(reads_list)>=reads_to_get){
-  #   reads_list <- dplyr::sample_n(reads_list,size=reads_to_get,replace = F) #No replacement
-  # }else{
-  #   sampled_reads <- dplyr::sample_n(reads_list,size=reads_to_get-nrow(reads_list),replace = T) #With replacement for the reads that are missing
-  #   reads_list <- rbind(reads_list,sampled_reads)
-  # }
+  #Get the number of fragments for the gene. 
+  reads_to_get <- gene_length*gene_tpm*seq_depth
   
   reads_list$read_start <- as.integer(reads_list$read_start)
   reads_list$read_end <- as.integer(reads_list$read_end)
   
   if (opt$fragments=='with_ground_truth'){
-  #Get a ground truth that belongs to fragmented and size selected fragments (but not mapped)
-  all_positions_selected <- unlist(mapply(seq, reads_list$read_start, reads_list$read_end))
-  freq_table_selected <- as.data.table(table(all_positions_selected))
-  setnames(freq_table_selected, c("position", "frequency"))
-  freq_table_selected[, position := as.integer(as.character(position))]
-  
-  dir_ground_truth <- paste(opt$dir_out,'/ground_truth_after_size_selection',sep = '')
-  dir.create(dir_ground_truth, showWarnings = FALSE, recursive = TRUE)
-  path_for_file <- paste(dir_ground_truth,'/',gene_id,'.tsv.gz',sep = '')
-  fwrite(freq_table_selected,path_for_file,sep = '\t',col.names = T,row.names = F,quote = F,compress = 'gzip')
+    #Get a ground truth that belongs to fragmented and size selected fragments (but not mapped)
+    all_positions_selected <- unlist(mapply(seq, reads_list$read_start, reads_list$read_end))
+    freq_table_selected <- as.data.table(table(all_positions_selected))
+    setnames(freq_table_selected, c("position", "frequency"))
+    freq_table_selected[, position := as.integer(as.character(position))]
+    
+    dir_ground_truth <- paste(opt$dir_out,'/ground_truth_after_size_selection',sep = '')
+    dir.create(dir_ground_truth, showWarnings = FALSE, recursive = TRUE)
+    path_for_file <- paste(dir_ground_truth,'/',gene_id,'.tsv.gz',sep = '')
+    fwrite(freq_table_selected,path_for_file,sep = '\t',col.names = T,row.names = F,quote = F,compress = 'gzip')
   }
   
-  reads_list <- reads_list %>%
+
+  reads_list_collapsed <- reads_list %>%
     dplyr::mutate(read_coordinate = paste0(read_start, "-", read_end)) %>%
     dplyr::group_by(transcript_id) %>%
     dplyr::summarise(read_coordinates = paste(read_coordinate, collapse = ","), .groups = "drop")
 
-  
-  full_reads$transcript_id <- as.numeric(full_reads$transcript_id)
-  reads_list$transcript_id <- as.numeric(reads_list$transcript_id)
-  
-  full_reads <- merge(full_reads,reads_list,by='transcript_id')
-  
   #### Get ground truth for all the fragments before fragmentation and size selection
-  #Calculate the ratio for all fragments/filtered fragments
   if (opt$fragments=='with_ground_truth'){
-  
-  ratio_total_passed <- nrow(reads_list_all_fragments)/nrow(reads_list_all_fragments[reads_list_all_fragments$size_selection=='passed_size_selection',])
-  #Sample the total reads based on the ratio and the assigned gene TPM
-  all_fragments_to_get <- reads_to_get#*ratio_total_passed
-  
-  #Sample multiple times to smooth the distribution
-   all_sampling <- data.frame()
-   for (j in 1:100){
-   if (nrow(reads_list_all_fragments)>=all_fragments_to_get){
-     reads_list_all_fragments_sampled <- dplyr::sample_n(reads_list_all_fragments,size=all_fragments_to_get,replace = F) #No replacement
-   }else{
-     sampled_reads <- dplyr::sample_n(reads_list_all_fragments,size=all_fragments_to_get-nrow(reads_list_all_fragments),replace = T) #With replacement for the reads that are missing
-     reads_list_all_fragments_sampled <- rbind(reads_list_all_fragments,sampled_reads)
-   }
-  
-  #Get ground truth for the number of mRNAs that are going into this -> used for edge effect correction
-  all_positions <- unlist(mapply(seq, reads_list_all_fragments_sampled$read_start, reads_list_all_fragments_sampled$read_end))
-  freq_table <- as.data.table(table(all_positions))
-  setnames(freq_table, c("position", "frequency"))
-  freq_table[, position := as.integer(as.character(position))]
-  all_sampling <- rbind(all_sampling,freq_table)
+    
+    ratio_total_passed <- nrow(reads_list_all_fragments)/nrow(reads_list_all_fragments[reads_list_all_fragments$size_selection=='passed_size_selection',])
+    #Sample the total reads based on the ratio and the assigned gene TPM
+    all_fragments_to_get <- reads_to_get
+    
+    #Sample multiple times to smooth the distribution
+    all_sampling <- data.frame()
+    for (j in 1:100){
+      if (nrow(reads_list_all_fragments)>=all_fragments_to_get){
+        reads_list_all_fragments_sampled <- dplyr::sample_n(reads_list_all_fragments,size=all_fragments_to_get,replace = F) #No replacement
+      }else{
+        sampled_reads <- dplyr::sample_n(reads_list_all_fragments,size=all_fragments_to_get-nrow(reads_list_all_fragments),replace = T) #With replacement for the reads that are missing
+        reads_list_all_fragments_sampled <- rbind(reads_list_all_fragments,sampled_reads)
+      }
+      
+      #Get ground truth for the number of mRNAs that are going into this -> used for edge effect correction
+      all_positions <- unlist(mapply(seq, reads_list_all_fragments_sampled$read_start, reads_list_all_fragments_sampled$read_end))
+      freq_table <- as.data.table(table(all_positions))
+      setnames(freq_table, c("position", "frequency"))
+      freq_table[, position := as.integer(as.character(position))]
+      all_sampling <- rbind(all_sampling,freq_table)
+    }
+    final_freqs <- all_sampling %>% dplyr::group_by(position) %>% dplyr::reframe(frequency=mean(frequency))
+    final_freqs <- final_freqs[-nrow(final_freqs),]#Remove last nucleotide which will always be noisy
+    
+    dir_ground_truth <- paste(opt$dir_out,'/ground_truth_pre_size_selection',sep = '')
+    dir.create(dir_ground_truth, showWarnings = FALSE, recursive = TRUE)
+    path_for_file <- paste(dir_ground_truth,'/', gene_id,'.tsv.gz',sep = '')
+    fwrite(final_freqs,path_for_file,sep = '\t',col.names = T,row.names = F,quote = F,compress = 'gzip')
   }
-  final_freqs <- all_sampling %>% dplyr::group_by(position) %>% dplyr::reframe(frequency=mean(frequency))
-  final_freqs <- final_freqs[-nrow(final_freqs),]#Remove last nucleotide which will always be noisy
-  
-  dir_ground_truth <- paste(opt$dir_out,'/ground_truth_pre_size_selection',sep = '')
-  dir.create(dir_ground_truth, showWarnings = FALSE, recursive = TRUE)
-  path_for_file <- paste(dir_ground_truth,'/', gene_id,'.tsv.gz',sep = '')
-  fwrite(final_freqs,path_for_file,sep = '\t',col.names = T,row.names = F,quote = F,compress = 'gzip')
-  }
-  #Export
+
   temp_dir <- paste(opt$dir_out,'/temp/mRNAs_with_fragments',sep = '')
   dir.create(temp_dir, showWarnings = FALSE, recursive = TRUE)
   path_for_file <- paste(temp_dir,'/',gene_id,'_fragments.tsv',sep = '')
-  fwrite(full_reads,path_for_file,sep = '\t',col.names = T,row.names = F,quote = F)
+  
+  fwrite(reads_list_collapsed, path_for_file, sep = '\t', col.names = T, row.names = F, quote = F)
+
 }
+
+
+
 
 
 
