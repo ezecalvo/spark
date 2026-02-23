@@ -15,15 +15,19 @@ option_list = list(
   make_option(c("--seq_depth"), type="numeric", default=20000000, 
               help="sequencing depth", metavar="numeric"),
   make_option(c("--tpm_lower_limit"), type="numeric", default=5, 
-              help="sequencing depth", metavar="numeric"),
+              help="TPM lower limit", metavar="numeric"),
   make_option(c("--tpm_upper_limit"), type="numeric", default=200, 
-              help="sequencing depth", metavar="numeric"),
+              help="TPM upper limit", metavar="numeric"),
   make_option(c("-o", "--dir_out"), type="character", default=".", 
               help="dir out to create temp files", metavar="character"),
   make_option(c("--seed"), type="numeric", default=NULL,
               help="seed for randomization"),
   make_option(c("--fragments"), type="character", default='no', 
-              help="to export ground truth", metavar="character")
+              help="to export ground truth", metavar="character"),
+  make_option(c("--no_sizeselection"), action="store_true", default=FALSE,
+              help="If specified, do not filter fragments by size (keep everything)"),
+  make_option(c("--no_fragmentation"), action="store_true", default=FALSE,
+              help="If specified, do not fragment; keep full molecule length")
 )
 
 #Parse input
@@ -55,7 +59,29 @@ file_importer <- function(file){
 }
 
 #Chopper function
-get_reads <- function(lengths, eta_val = 200, insert_size, transcript_id) {
+get_reads <- function(lengths, eta_val = 200, insert_size, transcript_id, no_fragmentation=FALSE, no_sizeselection=FALSE) {
+  
+  if (no_fragmentation) {
+    # return a single fragment from 1 to the end of the molecule
+    fragments <- data.frame(
+      transcript_id = transcript_id,
+      read_start = 1,
+      read_end = lengths,
+      length = lengths, # length is the full length
+      size_selection = 'passed_size_selection' 
+    )
+    
+    if (!no_sizeselection) {
+      if (fragments$length < insert_size[1] || fragments$length > insert_size[2]) {
+        fragments$size_selection <- 'filtered_out'
+      }
+    }
+    
+    
+    fragments$length <- NULL 
+    
+    return(fragments)
+  }
   
   eta_val <- mean(c(insert_size[1],insert_size[2]))
   
@@ -110,7 +136,15 @@ get_reads <- function(lengths, eta_val = 200, insert_size, transcript_id) {
   
   # Filter by insert size
   fragments$size_selection <- 'filtered_out'
-  fragments[fragments$length >= insert_size[1] & fragments$length <= insert_size[2], 'size_selection'] <- 'passed_size_selection'
+  
+  
+  if (no_sizeselection) {
+    # ff the flag is set, everything passes the selection
+  } else {
+    fragments$size_selection <- 'passed_size_selection'
+    fragments[fragments$length >= insert_size[1] & fragments$length <= insert_size[2], 'size_selection'] <- 'passed_size_selection'
+  }
+  
   fragments$length <- NULL  # Optional: drop if not needed
   
   return(fragments)
@@ -129,7 +163,10 @@ gene_id <- sub(".*/(ENSG[0-9]+(?:_background)?)(?:\\.tsv\\.gz)$", "\\1", file)
 list_with_all_fragments <- lapply(seq_len(nrow(full_reads)), function(i) {
   get_reads(lengths = full_reads$sequence_length[i],
             insert_size = insert_size,
-            transcript_id = full_reads$transcript_id[i])
+            transcript_id = full_reads$transcript_id[i],
+            # Pass the new options from the opt object
+            no_fragmentation = opt$no_fragmentation,
+            no_sizeselection = opt$no_sizeselection)
 })
 
 reads_list <- dplyr::bind_rows(list_with_all_fragments,.id = 'transcript_id')
@@ -166,16 +203,23 @@ if (nrow(reads_list)>10){ #Some genes have really short mRNAs and will get filte
     fwrite(freq_table_selected,path_for_file,sep = '\t',col.names = T,row.names = F,quote = F,compress = 'gzip')
   }
   
-
+  
   reads_list_collapsed <- reads_list %>%
     dplyr::mutate(read_coordinate = paste0(read_start, "-", read_end)) %>%
     dplyr::group_by(transcript_id) %>%
     dplyr::summarise(read_coordinates = paste(read_coordinate, collapse = ","), .groups = "drop")
-
+  
   #### Get ground truth for all the fragments before fragmentation and size selection
   if (opt$fragments=='with_ground_truth'){
     
-    ratio_total_passed <- nrow(reads_list_all_fragments)/nrow(reads_list_all_fragments[reads_list_all_fragments$size_selection=='passed_size_selection',])
+    # Avoid division by zero if all fragments pass size selection (which happens with no_sizeselection)
+    n_passed <- nrow(reads_list_all_fragments[reads_list_all_fragments$size_selection=='passed_size_selection',])
+    if(n_passed == 0) {
+      ratio_total_passed <- 0
+    } else {
+      ratio_total_passed <- nrow(reads_list_all_fragments)/n_passed
+    }
+    
     #Sample the total reads based on the ratio and the assigned gene TPM
     all_fragments_to_get <- reads_to_get
     
@@ -204,25 +248,13 @@ if (nrow(reads_list)>10){ #Some genes have really short mRNAs and will get filte
     path_for_file <- paste(dir_ground_truth,'/', gene_id,'.tsv.gz',sep = '')
     fwrite(final_freqs,path_for_file,sep = '\t',col.names = T,row.names = F,quote = F,compress = 'gzip')
   }
-
+  
   temp_dir <- paste(opt$dir_out,'/temp/mRNAs_with_fragments',sep = '')
   dir.create(temp_dir, showWarnings = FALSE, recursive = TRUE)
   path_for_file <- paste(temp_dir,'/',gene_id,'_fragments.tsv',sep = '')
   
   fwrite(reads_list_collapsed, path_for_file, sep = '\t', col.names = T, row.names = F, quote = F)
-
+  
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 

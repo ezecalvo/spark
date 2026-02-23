@@ -56,7 +56,6 @@ def process_and_write_fastq(
 
     try:
         for row in df_sampled.itertuples():
-            # 1. Get Reference Data
             ref_data = lookup_dict.get(row.transcript_id)
             if not ref_data: continue 
             
@@ -65,48 +64,32 @@ def process_and_write_fastq(
             inc_pos = ref_data['inc']
             mol_id = ref_data['mol_id']
 
-            # 2. Parse Coordinates
             try:
                 r_start, r_end = map(int, row.read_coordinate_split.split('-'))
             except AttributeError:
                 continue
 
-            # =========================================================
-            # 3. Define Regions (CORRECTED)
-            # =========================================================
-            # Ensure neither read extends beyond the fragment's physical boundaries.
-            
-            # Upstream read (starts at r_start, cannot go past r_end)
             upstream_start = r_start
             upstream_end = min(r_end, r_start + read_length)
             
-            # Downstream read (ends at r_end, cannot start before r_start)
             downstream_start = max(r_start, r_end - read_length)
             downstream_end = r_end
             
-            # Note: If fragment_length < read_length, both reads will now be 
-            # exactly fragment_length long (e.g., both 50bp).
-            # =========================================================
-
-            # 4. Filter for TTseq if required
             inc_upstream = [p for p in inc_pos if upstream_start <= p <= upstream_end]
             inc_downstream = [p for p in inc_pos if downstream_start <= p <= downstream_end]
             
             if ttseq and (len(inc_upstream) == 0 and len(inc_downstream) == 0):
                 continue
 
-            # 5. Extract Sequences
             seq_upstream = full_seq[upstream_start:upstream_end]
             seq_downstream = full_seq[downstream_start:downstream_end]
 
-            # 6. Calculate Conversions/Inc
             conv_upstream = [p - upstream_start for p in conv_pos if upstream_start <= p <= upstream_end]
             conv_downstream = [p - downstream_start for p in conv_pos if downstream_start <= p <= downstream_end]
             
             inc_upstream_rel = [p - upstream_start for p in inc_upstream]
             inc_downstream_rel = [p - downstream_start for p in inc_downstream]
 
-            # 7. Generate FASTQ Records
             random_suffix = make_random_suffix()
 
             if sequencing_type == "SE":
@@ -120,7 +103,7 @@ def process_and_write_fastq(
                 elif strandedness == "unstranded":
                     target_read = "downstream" if random.choice([True, False]) else "upstream"
                     rev = target_read == "downstream"
-               
+                
                 if target_read == "upstream":
                     final_seq = seq_upstream
                     n_inc = len(inc_upstream_rel)
@@ -137,7 +120,7 @@ def process_and_write_fastq(
                     abs_coords = get_absolute_coords(rates_df, downstream_start, downstream_end - 1)
 
                 final_seq_proc = process_sequence(final_seq, reverse_comp=rev)
-               
+                
                 conv_str = ','.join(str(pos + 1) for pos in p_conv)
                 inc_str = ','.join(str(pos + 1) for pos in p_inc)
 
@@ -164,14 +147,14 @@ def process_and_write_fastq(
                     meta1 = (len(inc_upstream_rel), inc_upstream_rel, len(conv_upstream), conv_upstream)
                     meta2 = (len(inc_downstream_rel), inc_downstream_rel, len(conv_downstream), conv_downstream)
                 elif strandedness == "unstranded":
-                     if random.choice([True, False]):
+                    if random.choice([True, False]):
                         s1, rev1 = seq_downstream, True
                         s2, rev2 = seq_upstream, False
                         coords1 = get_absolute_coords(rates_df, downstream_start, downstream_end - 1)
                         coords2 = get_absolute_coords(rates_df, upstream_start, upstream_end - 1)
                         meta1 = (len(inc_downstream_rel), inc_downstream_rel, len(conv_downstream), conv_downstream)
                         meta2 = (len(inc_upstream_rel), inc_upstream_rel, len(conv_upstream), conv_upstream)
-                     else:
+                    else:
                         s1, rev1 = seq_upstream, False
                         s2, rev2 = seq_downstream, True
                         coords1 = get_absolute_coords(rates_df, upstream_start, upstream_end - 1)
@@ -211,6 +194,8 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, help="random seed for reproducibility")
     parser.add_argument("--experiment_time", type=int, default=15, help="experiment time in minutes")
     parser.add_argument("--bkg_molecules", type=float, default=0.0, help="Proportion of total reads that should be background (0.0 to 1.0). Default 0.")
+    parser.add_argument("--no_sizeselection", action="store_true", help="If specified, do not filter fragments by size")
+    parser.add_argument("--no_fragmentation", action="store_true", help="If specified, do not fragment; keep full molecule length")
 
     args = parser.parse_args()
 
@@ -218,7 +203,6 @@ if __name__ == "__main__":
         random.seed(args.seed)
         np.random.seed(args.seed)
 
-    # 1. Run R Chopper for Main Gene
     cmd_chop = [
             f"Rscript {os.path.join(SCRIPT_DIR, 'short_read_chopper.R')}",
             f"--tsv {args.input_df}",
@@ -234,6 +218,10 @@ if __name__ == "__main__":
         cmd_chop += ['--seed', str(args.seed)]
     if args.fragments:
         cmd_chop += ['--fragments with_ground_truth']
+    if args.no_sizeselection:
+        cmd_chop += ['--no_sizeselection']
+    if args.no_fragmentation:
+        cmd_chop += ['--no_fragmentation']
 
     run_cmd(" ".join(cmd_chop))
     
@@ -243,15 +231,11 @@ if __name__ == "__main__":
     chopped_coordinates_file_path = f"{args.o}/temp/mRNAs_with_fragments/{base_filename}_fragments.tsv"
     rates_for_gene = f"{args.o}/rate_per_gene/{base_filename}_RatesandTraversalTimes.gtf"
 
-    # ==========================
-    # LOAD GENE DATA
-    # ==========================
     print("[Python] Loading Gene references and fragments...")
     
-    # Load Reference Dict (Gene)
     df_ref_raw = pd.read_csv(args.input_df, delimiter="\t")
     for col in ['converted_positions', 'incorporated_positions']:
-         df_ref_raw[col] = df_ref_raw[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else (x if isinstance(x, list) else []))
+        df_ref_raw[col] = df_ref_raw[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else (x if isinstance(x, list) else []))
     
     df_ref_raw['transcript_id'] = range(1, len(df_ref_raw) + 1)
     
@@ -265,7 +249,6 @@ if __name__ == "__main__":
         }
     del df_ref_raw 
 
-    # Load Fragments (Gene)
     try:
         df_frags = pd.read_csv(chopped_coordinates_file_path, delimiter="\t")
         df_frags['read_coordinates'] = df_frags['read_coordinates'].astype(str).str.split(',')
@@ -274,9 +257,6 @@ if __name__ == "__main__":
     except (FileNotFoundError, pd.errors.EmptyDataError):
         df_exploded = pd.DataFrame(columns=['transcript_id', 'read_coordinate_split'])
 
-    # ==========================
-    # CALCULATE SAMPLING TARGETS
-    # ==========================
     gtf_path = f"{args.o}/gtf/{base_filename}.tsv.gz"
     if os.path.exists(gtf_path):
         df_gtf = pd.read_csv(gtf_path, delimiter="\t")
@@ -288,13 +268,11 @@ if __name__ == "__main__":
     gene_tpm = np.random.uniform(low=int(args.tpm_lower_limit), high=int(args.tpm_upper_limit))
     seq_depth_million = args.seq_depth / 1e6
     
-    # NEW LOGIC: Calculate Total Budget based on TPM/Depth, then split.
     total_reads_budget = int(gene_length * gene_tpm * seq_depth_million)
     
     if args.bkg_molecules > 0.0:
         reads_to_get_bg = int(total_reads_budget * args.bkg_molecules)
         reads_to_get_gene = total_reads_budget - reads_to_get_bg
-        # Ensure we don't go negative if budget is tiny
         if reads_to_get_gene < 0: 
             reads_to_get_gene = 0
             reads_to_get_bg = total_reads_budget
@@ -304,9 +282,6 @@ if __name__ == "__main__":
     
     print(f"[Python] Total Target: {total_reads_budget} | Gene Reads: {reads_to_get_gene} | BG Reads: {reads_to_get_bg}")
 
-    # ==========================
-    # SAMPLE GENE READS
-    # ==========================
     if not df_exploded.empty and reads_to_get_gene > 0:
         if len(df_exploded) >= reads_to_get_gene:
             df_gene_final = df_exploded.sample(n=reads_to_get_gene, replace=False)
@@ -322,9 +297,6 @@ if __name__ == "__main__":
 
     print(f"[Python] Final Gene Reads: {len(df_gene_final)}")
 
-    # ==========================
-    # PROCESS BACKGROUND
-    # ==========================
     df_bg_final = pd.DataFrame()
     
     if reads_to_get_bg > 0:
@@ -334,7 +306,6 @@ if __name__ == "__main__":
             
             print(f"[Python] Processing Background. Target BG Reads: {reads_to_get_bg}")
 
-            # 2. Run R Chopper for BG
             cmd_chop_bg = [
                 f"Rscript {os.path.join(SCRIPT_DIR, 'short_read_chopper.R')}",
                 f"--tsv {path_to_BGmRNAs}",
@@ -348,10 +319,13 @@ if __name__ == "__main__":
             ]
             if args.seed:
                 cmd_chop_bg += ['--seed', str(args.seed)]
+            if args.no_sizeselection:
+                cmd_chop_bg += ['--no_sizeselection']
+            if args.no_fragmentation:
+                cmd_chop_bg += ['--no_fragmentation']
             
             run_cmd(" ".join(cmd_chop_bg))
             
-            # 3. Load BG Data
             offset_bg = 10_000_000 
             
             df_bg_ref = pd.read_csv(path_to_BGmRNAs, delimiter="\t")
@@ -368,7 +342,6 @@ if __name__ == "__main__":
                 }
             del df_bg_ref
 
-            # 4. Load BG Fragments
             chopped_bg_path = f"{args.o}/temp/mRNAs_with_fragments/{base_filename}_background_fragments.tsv"
             try:
                 df_bg_frags = pd.read_csv(chopped_bg_path, delimiter="\t")
@@ -380,7 +353,6 @@ if __name__ == "__main__":
                 
                 print(f"[Python] Raw BG Fragments Available: {len(df_bg_exploded)}")
 
-                # 5. Sample BG Reads
                 if not df_bg_exploded.empty:
                     if len(df_bg_exploded) >= reads_to_get_bg:
                         df_bg_final = df_bg_exploded.sample(n=reads_to_get_bg, replace=False)
@@ -394,9 +366,6 @@ if __name__ == "__main__":
             except (FileNotFoundError, pd.errors.EmptyDataError):
                 print("[Warning] Background file empty or missing.")
 
-    # ==========================
-    # COMBINE & WRITE
-    # ==========================
     df_total = pd.concat([df_gene_final, df_bg_final], ignore_index=True)
     df_total = df_total.sample(frac=1).reset_index(drop=True)
 
@@ -422,4 +391,3 @@ if __name__ == "__main__":
         if os.path.exists(chopped_coordinates_file_path):
             os.remove(chopped_coordinates_file_path)
     except OSError: pass
-

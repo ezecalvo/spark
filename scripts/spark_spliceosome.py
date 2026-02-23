@@ -343,7 +343,8 @@ if __name__ == "__main__":
     mRNA_df = pd.read_csv(args.mRNA_df, sep="\t", comment="#")
     output_filename_spliced_mRNAs = os.path.join(args.o, 'mRNA', base_filename + ".tsv.gz")
 
-    if args.nosplicing or "_background" in filename:
+    
+    if args.nosplicing or "_background" in filename or mRNA_df.empty:
         mRNA_df.to_csv(output_filename_spliced_mRNAs, sep='\t', index=False)
         exit(0)
 
@@ -446,3 +447,6 @@ if __name__ == "__main__":
         else:
             intron_df_to_save = intron_df
         intron_df_to_save.to_csv(output_intron_abscoords, sep='\t', compression='gzip', index=False)
+
+
+

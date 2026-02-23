@@ -217,8 +217,11 @@ if __name__ == "__main__":
     
     # Calculate Molecules per Cell (Per Simulation Unit)
     n_pol_per_unit = (max_transcript_length / mean_elong_rate + total_pausing_times) / (initiation_interval_sec / 60)
+    
+    bolus_per_unit = 0
     if args.drb:
-        n_pol_per_unit = 0
+        n_pol_per_unit = 0 # Clear pre-existing elongating polymerases
+        bolus_per_unit = 1 # One paused polymerase at the TSS ready to fire
 
     # Determine how many "cells" (scaling_factor) we actually need to hit target size
     
@@ -227,12 +230,14 @@ if __name__ == "__main__":
     
     # Add safety buffer (20%) and account for background loss
     needed_molecules = int(target_sample_size * 1.2)
-    if args.bkg_molecules > 0:
+    if args.bkg_molecules == 1:
+        needed_molecules = 0
+    elif args.bkg_molecules > 0:
         needed_molecules = int(needed_molecules / (1 - args.bkg_molecules))
-
+    
     # Calculate total molecules generated per single simulation unit (scaling_factor=1)
     initiations_per_unit = args.experiment_time / (initiation_interval_sec / 60)
-    total_molecules_per_unit = n_pol_per_unit + initiations_per_unit
+    total_molecules_per_unit = n_pol_per_unit + bolus_per_unit + initiations_per_unit
 
     # Calculate minimal scaling factor needed
     if total_molecules_per_unit > 0:
@@ -288,15 +293,23 @@ if __name__ == "__main__":
 
     num_cells_needed = scaling_factor
     all_new_initiations = []
-    if num_cells_needed > 0 and n_mol_to_initiate > 0:
+
+    if num_cells_needed > 0:
         for _ in range(int(num_cells_needed)):
-            current_time = 0.0
-            while current_time < experiment_time_sec:
-                wait = rng.exponential(1.0 / initiation_rate_per_sec)
-                current_time += wait
-                if current_time < experiment_time_sec:
-                    labeling_duration_sec = experiment_time_sec - current_time
-                    all_new_initiations.append(labeling_duration_sec)
+            
+            # 1. SYNCHRONIZED WAVE: 1 paused polymerase released per cell exactly at t=0
+            if args.drb:
+                all_new_initiations.append(experiment_time_sec)
+            
+            # 2. NORMAL STOCHASTIC INITIATION: Resumes behind the wave (or runs continuously for steady-state)
+            if n_mol_to_initiate > 0:
+                current_time = 0.0
+                while current_time < experiment_time_sec:
+                    wait = rng.exponential(1.0 / initiation_rate_per_sec)
+                    current_time += wait
+                    if current_time < experiment_time_sec:
+                        labeling_duration_sec = experiment_time_sec - current_time
+                        all_new_initiations.append(labeling_duration_sec)
 
     initiation_times.extend(all_new_initiations)
     start_label_pos_list.extend([1] * len(all_new_initiations))
