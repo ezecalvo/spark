@@ -1,5 +1,3 @@
-
-
 suppressPackageStartupMessages(library(data.table))
 suppressPackageStartupMessages(library(dplyr))
 suppressPackageStartupMessages(library(optparse))
@@ -17,15 +15,18 @@ option_list = list(
   make_option(c("--seq_depth"), type="numeric", default=20000000, 
               help="sequencing depth", metavar="numeric"),
   make_option(c("--tpm_lower_limit"), type="numeric", default=5, 
-              help="sequencing depth", metavar="numeric"),
+              help="TPM lower limit", metavar="numeric"),
   make_option(c("--tpm_upper_limit"), type="numeric", default=200, 
-              help="sequencing depth", metavar="numeric"),
+              help="TPM upper limit", metavar="numeric"),
   make_option(c("-o", "--dir_out"), type="character", default=".", 
               help="dir out to create temp files", metavar="character"),
   make_option(c("--seed"), type="numeric", default=NULL,
-              help="seed for randomization")
+              help="seed for randomization"),
+  make_option(c("--no_sizeselection"), action="store_true", default=FALSE,
+              help="If specified, do not filter fragments by size (keep everything)"),
+  make_option(c("--no_fragmentation"), action="store_true", default=FALSE,
+              help="If specified, do not fragment; keep full molecule length")
 )
-
 
 #Parse input
 opt_parser = OptionParser(option_list=option_list)
@@ -38,7 +39,6 @@ if (is.null(opt$tsv)){
 if (!is.null(opt$seed)){
   set.seed(opt$seed)
 }
-
 
 setDTthreads(threads = opt$threads)
 insert_size <- opt$insert_size
@@ -56,17 +56,34 @@ file_importer <- function(file){
 }
 
 #Chopper function
-get_reads <- function(lengths, eta_val = 200, insert_size, transcript_id) {
+get_reads <- function(lengths, eta_val = 200, insert_size, transcript_id, no_fragmentation=FALSE, no_sizeselection=FALSE) {
+  
+  if (no_fragmentation) {
+    # return a single fragment from 1 to the end of the molecule
+    fragments <- data.frame(
+      transcript_id = transcript_id,
+      read_start = 1,
+      read_end = lengths,
+      length = lengths, # length is the full length
+      size_selection = 'filtered_out' 
+    )
+    
+    if (no_sizeselection) {
+      if (fragments$length >= 1) {
+        fragments$size_selection <- 'passed_size_selection'
+      }
+    } else {
+      if (fragments$length >= insert_size[1] && fragments$length <= insert_size[2]) {
+        fragments$size_selection <- 'passed_size_selection'
+      }
+    }
+    
+    fragments$length <- NULL 
+    
+    return(fragments)
+  }
   
   eta_val <- mean(c(insert_size[1],insert_size[2]))
-  # Select a fragment from each transcript, size select, and return the start and end positions
-  # Inputs: 
-  #   lengths - the length of the transcript
-  #   eta_val - eta parameter for Weibull distribution
-  #   insert_size - vector of length two with the lower and upper bounds for valid fragments
-  #   transcript_id - the transcript ID to assign to each resulting fragment
-  # Output:
-  #   A data frame with transcript_id, read_start, and read_end
   
   deltas <- log10(lengths)
   ns_minus_1 <- pmax(round(lengths / eta_val / gamma(1 / deltas + 1)) - 1, 0)
@@ -118,8 +135,15 @@ get_reads <- function(lengths, eta_val = 200, insert_size, transcript_id) {
   fragments$length <- fragments$read_end - fragments$read_start
   
   # Filter by insert size
-  fragments$size_selection <- 'passed_size_selection'
-  #fragments[fragments$length >= insert_size[1] & fragments$length <= insert_size[2], 'size_selection'] <- 'passed_size_selection'
+  fragments$size_selection <- 'filtered_out'
+  
+  if (no_sizeselection) {
+    # Keep everything that is at least 1 nucleotide long
+    fragments[fragments$length >= 1, 'size_selection'] <- 'passed_size_selection'
+  } else {
+    fragments[fragments$length >= insert_size[1] & fragments$length <= insert_size[2], 'size_selection'] <- 'passed_size_selection'
+  }
+  
   fragments$length <- NULL  # Optional: drop if not needed
   
   return(fragments)
@@ -139,7 +163,9 @@ gene_id <- sub(".*\\/([A-Z]+[0-9]+(?:_[a-z]+)?)\\.tsv\\.gz$", "\\1", file)
 list_with_all_fragments <- lapply(seq_len(nrow(full_reads)), function(i) {
   get_reads(lengths = full_reads$sequence_length[i],
             insert_size = insert_size,
-            transcript_id = full_reads$transcript_id[i])
+            transcript_id = full_reads$transcript_id[i],
+            no_fragmentation = opt$no_fragmentation,
+            no_sizeselection = opt$no_sizeselection)
 })
 
 reads_list <- dplyr::bind_rows(list_with_all_fragments,.id = 'transcript_id')
@@ -160,17 +186,6 @@ if (nrow(reads_list)>10){ #Some genes have really short mRNAs and will get filte
   #Keep fragments longer than 10nt
   reads_list <- reads_list %>% dplyr::filter(read_end-read_start>10)
   
-  #Get a ground truth that belongs to fragmented and size selected fragments (but not mapped)
-  # all_positions_selected <- unlist(mapply(seq, reads_list$read_start, reads_list$read_end))
-  # freq_table_selected <- as.data.table(table(all_positions_selected))
-  # setnames(freq_table_selected, c("position", "frequency"))
-  # freq_table_selected[, position := as.integer(as.character(position))]
-  # 
-  # dir_ground_truth <- paste(opt$dir_out,'/ground_truth_after_size_selection',sep = '')
-  # dir.create(dir_ground_truth, showWarnings = FALSE, recursive = TRUE)
-  # path_for_file <- paste(dir_ground_truth,'/',gene_id,'.tsv.gz',sep = '')
-  # fwrite(freq_table_selected,path_for_file,sep = '\t',col.names = T,row.names = F,quote = F,compress = 'gzip')
-  
   reads_list <- reads_list %>%
     dplyr::mutate(read_coordinate = paste0(read_start, "-", read_end)) %>%
     dplyr::group_by(transcript_id) %>%
@@ -188,21 +203,3 @@ if (nrow(reads_list)>10){ #Some genes have really short mRNAs and will get filte
   path_for_file <- paste(temp_dir,'/',gene_id,'_fragments.tsv',sep = '')
   fwrite(full_reads,path_for_file,sep = '\t',col.names = T,row.names = F,quote = F)
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

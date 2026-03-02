@@ -190,7 +190,7 @@ def nascent_to_fastq(tsv):
         cmd = [f"python {os.path.join(SCRIPT_DIR, 'fastq_generator_short_read.py')}",
                f"--input_df {tsv}", f"--insert_size {args.insert_size}", f"--read_length {args.read_length}",
                f"--seq_type {args.seq_type}", f"--threads 1", f"--seq_depth {args.seq_depth}",
-               f"--tpm_lower_limit {tpm_lower}", f"--tpm_upper_limit {tpm_upper}", f"--s {args.s}", f"--o {output_dir}/", f"--experiment_time {args.experiment_time}"]
+               f"--tpm_lower_limit {tpm_lower}", f"--tpm_upper_limit {tpm_upper}", f"--s {args.s}", f"--o {output_dir}/", f"--experiment_time {args.experiment_time}", f"--bkg_molecules {args.bkg_molecules}"]
         if args.fragments: cmd.append('--fragments')
         if args.no_sizeselection: cmd.append("--no_sizeselection")
         if args.no_fragmentation: cmd.append("--no_fragmentation")
@@ -205,6 +205,8 @@ def ttseq_to_fastq(tsv):
            f"--seq_type {args.seq_type}", f"--threads 1", f"--seq_depth {args.seq_depth}",
            f"--tpm_lower_limit {tpm_lower}", f"--tpm_upper_limit {tpm_upper}", f"--s {args.s}", f"--o {args.o.rstrip('/')}/", f"--bkg_molecules {args.bkg_molecules}"]
     if args.fragments: cmd.append('--fragments')
+    if args.no_sizeselection: cmd.append("--no_sizeselection")
+    if args.no_fragmentation: cmd.append("--no_fragmentation")
     if args.seed: cmd.extend(['--seed', str(args.seed)])
     run_cmd(" ".join(cmd))
 
@@ -384,7 +386,7 @@ def main():
             run_cmd(f'cat "{reads_out_dir}"/*.fastq.gz > "{final_r1_path}"')
             
         if final_r1_path and os.path.exists(final_r1_path):
-             downsample_library(final_r1_path, final_r2_path, args.seq_depth, args.seed)
+            downsample_library(final_r1_path, final_r2_path, args.seq_depth, args.seed)
         
         run_cmd(f'rm -f "{reads_out_dir}"/*fastq*')
         temp_dir = f"{output_dir}/temp"

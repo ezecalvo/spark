@@ -65,8 +65,8 @@ def process_and_write_fastq(
             mol_id = ref_data['mol_id']
 
             try:
-                r_start, r_end = map(int, row.read_coordinate_split.split('-'))
-            except AttributeError:
+                r_start, r_end = map(int, str(row.read_coordinate_split).split('-'))
+            except (AttributeError, ValueError):
                 continue
 
             upstream_start = r_start
@@ -345,11 +345,21 @@ if __name__ == "__main__":
             chopped_bg_path = f"{args.o}/temp/mRNAs_with_fragments/{base_filename}_background_fragments.tsv"
             try:
                 df_bg_frags = pd.read_csv(chopped_bg_path, delimiter="\t")
-                df_bg_frags['transcript_id'] = df_bg_frags['transcript_id'] + offset_bg
                 
-                df_bg_frags['read_coordinates'] = df_bg_frags['read_coordinates'].astype(str).str.split(',')
-                df_bg_exploded = df_bg_frags.explode('read_coordinates').reset_index(drop=True)
-                df_bg_exploded.rename(columns={'read_coordinates': 'read_coordinate_split'}, inplace=True)
+                if not df_bg_frags.empty:
+                    # Force numeric conversion and drop any corrupted string rows
+                    df_bg_frags['transcript_id'] = pd.to_numeric(df_bg_frags['transcript_id'], errors='coerce')
+                    df_bg_frags = df_bg_frags.dropna(subset=['transcript_id'])
+                    
+                    if not df_bg_frags.empty:
+                        df_bg_frags['transcript_id'] = df_bg_frags['transcript_id'].astype(int) + offset_bg
+                        df_bg_frags['read_coordinates'] = df_bg_frags['read_coordinates'].astype(str).str.split(',')
+                        df_bg_exploded = df_bg_frags.explode('read_coordinates').reset_index(drop=True)
+                        df_bg_exploded.rename(columns={'read_coordinates': 'read_coordinate_split'}, inplace=True)
+                    else:
+                        df_bg_exploded = pd.DataFrame(columns=['transcript_id', 'read_coordinate_split'])
+                else:
+                    df_bg_exploded = pd.DataFrame(columns=['transcript_id', 'read_coordinate_split'])
                 
                 print(f"[Python] Raw BG Fragments Available: {len(df_bg_exploded)}")
 

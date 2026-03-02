@@ -279,6 +279,8 @@ if __name__ == "__main__":
     parser.add_argument('--bkg_molecules', type=float, default=0, help='proportion of background molecules')
     parser.add_argument('--o', type=str, default='./', help='output path')
     parser.add_argument("--seed", type=int, help="random seed for reproducibility")
+    parser.add_argument("--no_sizeselection", action="store_true", help="If specified, do not filter fragments by size")
+    parser.add_argument("--no_fragmentation", action="store_true", help="If specified, do not fragment; keep full molecule length")
 
     args = parser.parse_args()
 
@@ -292,13 +294,14 @@ if __name__ == "__main__":
             f"--insert_size {args.insert_size}",
             f"--read_length {args.read_length}",
             f"--threads {args.threads}",
-            #f"--seq_depth {args.seq_depth}",
-            #f"--tpm_lower_limit {args.tpm_lower_limit}",
-            #f"--tpm_upper_limit {args.tpm_upper_limit}",
             f"-o {args.o}"
         ]
     if args.seed:
         cmd_chop += ['--seed', str(args.seed)]
+    if args.no_sizeselection:
+        cmd_chop += ['--no_sizeselection']
+    if args.no_fragmentation:
+        cmd_chop += ['--no_fragmentation']
 
     run_cmd(" ".join(cmd_chop))
 
@@ -323,7 +326,7 @@ if __name__ == "__main__":
         # Add background if any
         path_to_BGmRNAs = os.path.join(os.path.dirname(args.o), "mRNA", base_filename + "_background.tsv.gz")
         if os.path.exists(path_to_BGmRNAs) and os.path.getsize(path_to_BGmRNAs) > 0:
-            cmd_chop = [
+            cmd_chop_bg = [
             f"Rscript {os.path.join(SCRIPT_DIR, 'short_read_chopper_TTseq.R')}",
             f"--tsv {path_to_BGmRNAs}",
             f"--insert_size {args.insert_size}",
@@ -332,9 +335,13 @@ if __name__ == "__main__":
             f"-o {args.o}"
             ]
             if args.seed:
-                cmd_chop += ['--seed', str(args.seed)]
+                cmd_chop_bg += ['--seed', str(args.seed)]
+            if args.no_sizeselection:
+                cmd_chop_bg += ['--no_sizeselection']
+            if args.no_fragmentation:
+                cmd_chop_bg += ['--no_fragmentation']
 
-            run_cmd(" ".join(cmd_chop))
+            run_cmd(" ".join(cmd_chop_bg))
             # Same as the pulldown samples but skipping the enrichment since these molecules are not labeled
             chopped_coordinates_BG_file_path = f"{args.o}/temp/mRNAs_with_fragments/{base_filename}_background_fragments.tsv"
             df_bg = pd.read_csv(chopped_coordinates_BG_file_path, delimiter="\t")
@@ -367,7 +374,9 @@ if __name__ == "__main__":
 
         result_df_pre_selection = result_df
         
-        result_df = result_df[(result_df['insert_size'] >= min_insert) & (result_df['insert_size'] <= max_insert)]
+        # Bypass Python internal size selection if --no_sizeselection is passed
+        if not args.no_sizeselection:
+            result_df = result_df[(result_df['insert_size'] >= min_insert) & (result_df['insert_size'] <= max_insert)]
 
         # Get fragments to sequence
         df_mrna = pd.read_csv(args.input_df, delimiter="\t")

@@ -68,15 +68,18 @@ get_reads <- function(lengths, eta_val = 200, insert_size, transcript_id, no_fra
       read_start = 1,
       read_end = lengths,
       length = lengths, # length is the full length
-      size_selection = 'passed_size_selection' 
+      size_selection = 'filtered_out' 
     )
     
-    if (!no_sizeselection) {
-      if (fragments$length < insert_size[1] || fragments$length > insert_size[2]) {
-        fragments$size_selection <- 'filtered_out'
+    if (no_sizeselection) {
+      if (fragments$length >= 1) {
+        fragments$size_selection <- 'passed_size_selection'
+      }
+    } else {
+      if (fragments$length >= insert_size[1] && fragments$length <= insert_size[2]) {
+        fragments$size_selection <- 'passed_size_selection'
       }
     }
-    
     
     fragments$length <- NULL 
     
@@ -137,11 +140,10 @@ get_reads <- function(lengths, eta_val = 200, insert_size, transcript_id, no_fra
   # Filter by insert size
   fragments$size_selection <- 'filtered_out'
   
-  
   if (no_sizeselection) {
-    # ff the flag is set, everything passes the selection
+    # Keep everything that is at least 1 nucleotide long
+    fragments[fragments$length >= 1, 'size_selection'] <- 'passed_size_selection'
   } else {
-    fragments$size_selection <- 'passed_size_selection'
     fragments[fragments$length >= insert_size[1] & fragments$length <= insert_size[2], 'size_selection'] <- 'passed_size_selection'
   }
   
@@ -256,5 +258,3 @@ if (nrow(reads_list)>10){ #Some genes have really short mRNAs and will get filte
   fwrite(reads_list_collapsed, path_for_file, sep = '\t', col.names = T, row.names = F, quote = F)
   
 }
-
-
