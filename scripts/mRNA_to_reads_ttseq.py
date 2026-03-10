@@ -21,29 +21,21 @@ def make_random_suffix(length=5):
 def extract_sequence_regions(df, read_length):
     df = df.copy()
 
-    # Ensure converted_positions and incorporated_positions are lists of ints
     for col in ['converted_positions', 'incorporated_positions']:
         df[col] = df[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
 
-    # Explode read_coordinates
     df_exploded = df.copy()
     df_exploded['read_coordinates'] = df_exploded['read_coordinates'].str.split(',')
     df_exploded = df_exploded.explode('read_coordinates').reset_index()
 
-    # Extract start/end coordinates
     coord_split = df_exploded['read_coordinates'].str.split('-', expand=True)
     df_exploded['read_start'] = coord_split[0].astype(int)
     df_exploded['read_end'] = coord_split[1].astype(int)
 
-    # -------------------------------------------------------------------------
-    # FIX: Helper function to extract sequence and apply padding if truncated
-    # -------------------------------------------------------------------------
     def get_padded_read(row, direction):
         full_seq = df.loc[row['index'], 'full_molecule_sequence']
         
         if direction == 'upstream':
-            # Upstream: Reads from Start -> Forward
-            # If (start + length) > len(seq), Python truncates. We pad the RIGHT side.
             start = row['read_start']
             end = start + read_length
             seq = full_seq[start:end]
@@ -53,8 +45,6 @@ def extract_sequence_regions(df, read_length):
             return seq
             
         elif direction == 'downstream':
-            # Downstream: Reads from End -> Backward
-            # If (end - length) < 0, we clamp to 0. Python truncates. We pad the LEFT side.
             end = row['read_end']
             start = end - read_length
             actual_start = max(0, start)
@@ -63,30 +53,24 @@ def extract_sequence_regions(df, read_length):
             
             if len(seq) < read_length:
                 padding = "N" * (read_length - len(seq))
-                # If we hit the absolute start (0), we are missing bases on the LEFT (5')
                 if actual_start == 0:
                     seq = padding + seq
                 else:
-                    # Rare case: if read_end > full_seq length (shouldn't happen with valid coords)
                     seq += padding
             return seq
 
-    # Apply the new padded logic
     df_exploded['read_upstream'] = df_exploded.apply(
         lambda row: get_padded_read(row, 'upstream'), axis=1
     )
     df_exploded['read_downstream'] = df_exploded.apply(
         lambda row: get_padded_read(row, 'downstream'), axis=1
     )
-    # -------------------------------------------------------------------------
 
-    # Count both converted and incorporated positions in upstream/downstream
     def count_and_list_subs(row):
         idx = row['index']
         read_start = row['read_start']
         read_end = row['read_end']
 
-        # Regions
         upstream_start = read_start
         upstream_end = read_start + read_length
         downstream_start = max(0, read_end - read_length)
@@ -98,11 +82,9 @@ def extract_sequence_regions(df, read_length):
             downstream_hits = [pos - downstream_start for pos in pos_list if downstream_start <= pos <= downstream_end]
             return upstream_hits, downstream_hits
 
-        # Converted
         conv = df.loc[idx, 'converted_positions']
         conv_upstream_hits, conv_downstream_hits = extract_hits(conv)
 
-        # Incorporated
         inc = df.loc[idx, 'incorporated_positions']
         inc_upstream_hits, inc_downstream_hits = extract_hits(inc)
 
@@ -128,19 +110,16 @@ def extract_sequence_regions(df, read_length):
 
 
 def reverse_complement(seq):
-    """Return the reverse complement of a DNA sequence."""
     complement = str.maketrans('ACGTacgt', 'TGCAtgca')
     return seq.translate(complement)[::-1]
 
 def process_sequence(sequence, reverse_comp=False):
-    """Process sequence by reversing and complementing if needed."""
     return reverse_complement(sequence) if reverse_comp else sequence
 
 
 def convert_to_fastq(df, output_prefix, sequencing_type, strandedness, read_length, rates_df, ttseq=False):
 
     def get_sequences(row, which):
-        # Always return a list of sequences
         seqs = row[which]
         if isinstance(seqs, list):
             return seqs
@@ -210,7 +189,7 @@ def convert_to_fastq(df, output_prefix, sequencing_type, strandedness, read_leng
                 n_pairs = min(len(upstream_seqs), len(downstream_seqs))
 
                 for i in range(n_pairs):
-                    random_suffix = make_random_suffix()  # single suffix per pair
+                    random_suffix = make_random_suffix() 
 
                     if strandedness == "rf":
                         seq_r1 = process_sequence(downstream_seqs[i], reverse_comp=True)
@@ -279,12 +258,11 @@ if __name__ == "__main__":
     parser.add_argument('--bkg_molecules', type=float, default=0, help='proportion of background molecules')
     parser.add_argument('--o', type=str, default='./', help='output path')
     parser.add_argument("--seed", type=int, help="random seed for reproducibility")
-    parser.add_argument("--no_sizeselection", action="store_true", help="If specified, do not filter fragments by size")
+    parser.add_argument("--sizeselectiontype", choices=["none", "hardcut", "probabilistic"], default="probabilistic", help="Type of size selection")
     parser.add_argument("--no_fragmentation", action="store_true", help="If specified, do not fragment; keep full molecule length")
 
     args = parser.parse_args()
 
-    # Set random seed if specified
     if args.seed is not None:
         random.seed(args.seed)
 
@@ -294,36 +272,30 @@ if __name__ == "__main__":
             f"--insert_size {args.insert_size}",
             f"--read_length {args.read_length}",
             f"--threads {args.threads}",
-            f"-o {args.o}"
+            f"-o {args.o}",
+            f"--sizeselectiontype {args.sizeselectiontype}"
         ]
     if args.seed:
         cmd_chop += ['--seed', str(args.seed)]
-    if args.no_sizeselection:
-        cmd_chop += ['--no_sizeselection']
     if args.no_fragmentation:
         cmd_chop += ['--no_fragmentation']
 
     run_cmd(" ".join(cmd_chop))
 
-    # Generate output name and file for output file with read and substitution info
     filename = os.path.splitext(os.path.basename(args.input_df))[0]
-    # Extract only the gene ID (first part before the first underscore)
     base_filename = filename.split(".")[0]
-    # Construct the output filename
     output_prefix = f"{args.o}/reads/{base_filename}"
 
-    # Import the chopped coordinates from R
     chopped_coordinates_file_path = f"{args.o}/temp/mRNAs_with_fragments/{base_filename}_fragments.tsv"
 
-    try: # Avoid errors if the reads were not generated (because the mRNAs were too short)
+    try: 
         df = pd.read_csv(chopped_coordinates_file_path, delimiter="\t")
         for col in ['converted_positions', 'incorporated_positions']:
             df[col] = df[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else (x if isinstance(x, list) else []))
 
         result_df = extract_sequence_regions(df, args.read_length)
-        result_df = result_df[(result_df['n_incorporated_in_upstream'] > 0) | (result_df['n_incorporated_in_downstream'] > 0)] #Get molecules with 4sU
+        result_df = result_df[(result_df['n_incorporated_in_upstream'] > 0) | (result_df['n_incorporated_in_downstream'] > 0)] 
 
-        # Add background if any
         path_to_BGmRNAs = os.path.join(os.path.dirname(args.o), "mRNA", base_filename + "_background.tsv.gz")
         if os.path.exists(path_to_BGmRNAs) and os.path.getsize(path_to_BGmRNAs) > 0:
             cmd_chop_bg = [
@@ -332,38 +304,31 @@ if __name__ == "__main__":
             f"--insert_size {args.insert_size}",
             f"--read_length {args.read_length}",
             f"--threads {args.threads}",
-            f"-o {args.o}"
+            f"-o {args.o}",
+            f"--sizeselectiontype {args.sizeselectiontype}"
             ]
             if args.seed:
                 cmd_chop_bg += ['--seed', str(args.seed)]
-            if args.no_sizeselection:
-                cmd_chop_bg += ['--no_sizeselection']
             if args.no_fragmentation:
                 cmd_chop_bg += ['--no_fragmentation']
 
             run_cmd(" ".join(cmd_chop_bg))
-            # Same as the pulldown samples but skipping the enrichment since these molecules are not labeled
             chopped_coordinates_BG_file_path = f"{args.o}/temp/mRNAs_with_fragments/{base_filename}_background_fragments.tsv"
             df_bg = pd.read_csv(chopped_coordinates_BG_file_path, delimiter="\t")
-            df_bg['molecule_id'] = df_bg['molecule_id'].astype(str) + '_BG_' # Add to the molecule ID that this is a background molecule
+            df_bg['molecule_id'] = df_bg['molecule_id'].astype(str) + '_BG_' 
             for col in ['converted_positions', 'incorporated_positions']:
                 df_bg[col] = df_bg[col].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else (x if isinstance(x, list) else []))
 
             result_df_bg = extract_sequence_regions(df_bg, args.read_length)
-            # Calculate number of rows to sample from the background dataframe
             n_bg = int(len(result_df) * args.bkg_molecules)
             if n_bg > 0:
                 if len(result_df_bg) >= n_bg:
                     result_df_bg = result_df_bg.sample(n=n_bg, random_state=42)
                 else:
-                    # If not enough BG fragments, take all and warn/upsample?
-                    # Current logic: take all available
                     pass
             
-            # Calculate number of rows to sample from the main dataframe
             n_main = int(len(result_df) * (1 - args.bkg_molecules))
-            result_df = result_df.sample(n=n_main, random_state=42) # Random sampling for reproducibility
-            # Optionally combine the sampled dataframes
+            result_df = result_df.sample(n=n_main, random_state=42) 
             result_df = pd.concat([result_df, result_df_bg]).reset_index(drop=True)
 
 
@@ -374,15 +339,12 @@ if __name__ == "__main__":
 
         result_df_pre_selection = result_df
         
-        # Bypass Python internal size selection if --no_sizeselection is passed
-        if not args.no_sizeselection:
+        if args.sizeselectiontype == 'hardcut':
             result_df = result_df[(result_df['insert_size'] >= min_insert) & (result_df['insert_size'] <= max_insert)]
 
-        # Get fragments to sequence
         df_mrna = pd.read_csv(args.input_df, delimiter="\t")
         df_mrna["sequence_length"] = df_mrna["full_molecule_sequence"].str.len()
         
-        # Calculate exon length to scale reads
         gtf_path = f"{args.o}/gtf/{base_filename}.tsv.gz"
         if os.path.exists(gtf_path):
             df_gtf = pd.read_csv(gtf_path, delimiter="\t")
@@ -391,19 +353,13 @@ if __name__ == "__main__":
         else:
             gene_length = df_mrna["sequence_length"].mean() / 1000
 
-        # random uniform value between tpm_lower_limit and tpm_upper_limit
         gene_tpm = np.random.uniform(low=int(args.tpm_lower_limit), high=int(args.tpm_upper_limit))
-        # sequencing depth (divided by 1e6)
         seq_depth = args.seq_depth / 1e6
-        # number of fragments for the gene
         reads_to_get = gene_length * gene_tpm * seq_depth
 
-        # Get pre size selection ground truth
         if args.fragments:
-            # Pre size selection coverage
             if not result_df_pre_selection.empty:
                 n_sample_pre = min(len(result_df_pre_selection), int(reads_to_get))
-                # Use replace=True only if we need more reads than exist
                 replace_pre = n_sample_pre > len(result_df_pre_selection)
                 result_df_pre_selection_sampled = result_df_pre_selection.sample(n=int(reads_to_get), replace=True, random_state=None)
                 
@@ -420,7 +376,6 @@ if __name__ == "__main__":
                     coverage_df_pre.to_csv(coverage_output_path_pre, sep='\t', index=False, compression='gzip')
 
 
-            # Post size selection coverage
             if not result_df.empty:
                 result_df_sampled = result_df.sample(n=int(reads_to_get), replace=True, random_state=None)
                 output_dir_post = os.path.join(args.o, 'ground_truth_after_size_selection')
@@ -448,7 +403,6 @@ if __name__ == "__main__":
                 sampled_reads = result_df.sample(
                     n=int(reads_to_get) - len(result_df), replace=True, random_state=None
                     )
-                # combine original and sampled
                 result_df = pd.concat([result_df, sampled_reads], ignore_index=True)
 
             rates_for_gene = f"{args.o}/rate_per_gene/{base_filename}_RatesandTraversalTimes.gtf"

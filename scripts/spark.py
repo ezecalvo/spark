@@ -1,3 +1,4 @@
+
 import argparse
 import subprocess
 import random
@@ -192,7 +193,7 @@ def nascent_to_fastq(tsv):
                f"--seq_type {args.seq_type}", f"--threads 1", f"--seq_depth {args.seq_depth}",
                f"--tpm_lower_limit {tpm_lower}", f"--tpm_upper_limit {tpm_upper}", f"--s {args.s}", f"--o {output_dir}/", f"--experiment_time {args.experiment_time}", f"--bkg_molecules {args.bkg_molecules}"]
         if args.fragments: cmd.append('--fragments')
-        if args.no_sizeselection: cmd.append("--no_sizeselection")
+        if args.sizeselectiontype: cmd.extend(["--sizeselectiontype", args.sizeselectiontype])
         if args.no_fragmentation: cmd.append("--no_fragmentation")
     if args.seed: cmd.extend(['--seed', str(args.seed)])
 
@@ -205,7 +206,7 @@ def ttseq_to_fastq(tsv):
            f"--seq_type {args.seq_type}", f"--threads 1", f"--seq_depth {args.seq_depth}",
            f"--tpm_lower_limit {tpm_lower}", f"--tpm_upper_limit {tpm_upper}", f"--s {args.s}", f"--o {args.o.rstrip('/')}/", f"--bkg_molecules {args.bkg_molecules}"]
     if args.fragments: cmd.append('--fragments')
-    if args.no_sizeselection: cmd.append("--no_sizeselection")
+    if args.sizeselectiontype: cmd.extend(["--sizeselectiontype", args.sizeselectiontype])
     if args.no_fragmentation: cmd.append("--no_fragmentation")
     if args.seed: cmd.extend(['--seed', str(args.seed)])
     run_cmd(" ".join(cmd))
@@ -263,8 +264,8 @@ def main():
     group_seq_tech.add_argument("--read_length", type=int, default=100, help="length of each read")
     group_seq_tech.add_argument("--s", choices=["rf", "fr", "unstranded"], default="rf", help="library strandedness")
     group_seq_tech.add_argument("--fragments", action="store_true", help="export a ground truth for fragmentation & size selection")
-    group_seq_tech.add_argument("--no_sizeselection", action="store_true", help="if specified, do not filter fragments by size (only valid for metabolic labeling)")
-    group_seq_tech.add_argument("--no_fragmentation", action="store_true", help="if specified, do not fragment (only valid for metabolic labeling)")
+    group_seq_tech.add_argument("--sizeselectiontype", choices=["none", "hardcut", "probabilistic"], default="probabilistic", help="type of size selection. 'hardcut' strictly filters fragments outside the --insert_size limits, while 'probabilistic' applies a double-sided sigmoid retention curve around those limits (only valid for nascentrnapd and ttseq)")
+    group_seq_tech.add_argument("--no_fragmentation", action="store_true", help="if specified, do not fragment (only valid for nascentrnapd and ttseq)")
 
     args = parser.parse_args()
     output_dir = args.o.rstrip("/")
@@ -395,3 +396,16 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
+

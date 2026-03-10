@@ -22,13 +22,12 @@ option_list = list(
               help="dir out to create temp files", metavar="character"),
   make_option(c("--seed"), type="numeric", default=NULL,
               help="seed for randomization"),
-  make_option(c("--no_sizeselection"), action="store_true", default=FALSE,
-              help="If specified, do not filter fragments by size (keep everything)"),
+  make_option(c("--sizeselectiontype"), type="character", default="probabilistic",
+              help="Type of size selection: none, hardcut, or probabilistic"),
   make_option(c("--no_fragmentation"), action="store_true", default=FALSE,
               help="If specified, do not fragment; keep full molecule length")
 )
 
-#Parse input
 opt_parser = OptionParser(option_list=option_list)
 opt = parse_args(opt_parser)
 
@@ -47,7 +46,6 @@ insert_size <- c(as.numeric(insert_size_split[1]), as.numeric(insert_size_split[
 
 file <- opt$tsv
 
-#File importing and formating
 file_importer <- function(file){
   full_reads <- data.table::fread(file=file, sep = '\t', header = T, stringsAsFactors = FALSE)
   full_reads$transcript_id <- as.numeric(1:nrow(full_reads))
@@ -55,21 +53,26 @@ file_importer <- function(file){
   return(full_reads)
 }
 
-#Chopper function
-get_reads <- function(lengths, eta_val = 200, insert_size, transcript_id, no_fragmentation=FALSE, no_sizeselection=FALSE) {
+get_reads <- function(lengths, eta_val = 200, insert_size, transcript_id, no_fragmentation=FALSE, sizeselectiontype="hardcut") {
   
   if (no_fragmentation) {
-    # return a single fragment from 1 to the end of the molecule
     fragments <- data.frame(
       transcript_id = transcript_id,
       read_start = 1,
       read_end = lengths,
-      length = lengths, # length is the full length
+      length = lengths, 
       size_selection = 'filtered_out' 
     )
     
-    if (no_sizeselection) {
+    if (sizeselectiontype == 'none') {
       if (fragments$length >= 1) {
+        fragments$size_selection <- 'passed_size_selection'
+      }
+    } else if (sizeselectiontype == 'probabilistic') {
+      p_left <- 1 / (1 + exp(-0.1 * (fragments$length - insert_size[1])))
+      p_right <- 1 / (1 + exp(0.1 * (fragments$length - insert_size[2])))
+      prob_keep <- p_left * p_right
+      if (runif(1) <= prob_keep) {
         fragments$size_selection <- 'passed_size_selection'
       }
     } else {
@@ -93,7 +96,6 @@ get_reads <- function(lengths, eta_val = 200, insert_size, transcript_id, no_fra
     round(len * x_t / sum(x_t))
   }, lengths, xis_transformed, SIMPLIFY = FALSE)
   
-  # Get all the start and end points of the fragments
   starts <- lapply(delta_is, function(d) {
     if (length(d) > 1) {
       c(sample(min(insert_size[1], d[1]), 1), cumsum(d[1:(length(d) - 1)]))
@@ -116,35 +118,36 @@ get_reads <- function(lengths, eta_val = 200, insert_size, transcript_id, no_fra
     read_end = unlist(ends)
   )
   
-  # Create first row from 1 to the first read_start
   first_row <- data.frame(
     transcript_id = fragments$transcript_id[1],
     read_start = 1,
     read_end = fragments$read_start[1]
   )
   
-  # Create last row from the last read_end to the value of lengths
   last_row <- data.frame(
     transcript_id = fragments$transcript_id[nrow(fragments)],
     read_start = fragments$read_end[nrow(fragments)],
     read_end = lengths
   )
   
-  # Combine all together
   fragments <- rbind(first_row, fragments, last_row)
   fragments$length <- fragments$read_end - fragments$read_start
   
-  # Filter by insert size
   fragments$size_selection <- 'filtered_out'
   
-  if (no_sizeselection) {
-    # Keep everything that is at least 1 nucleotide long
+  if (sizeselectiontype == 'none') {
     fragments[fragments$length >= 1, 'size_selection'] <- 'passed_size_selection'
+  } else if (sizeselectiontype == 'probabilistic') {
+    p_left <- 1 / (1 + exp(-0.1 * (fragments$length - insert_size[1])))
+    p_right <- 1 / (1 + exp(0.1 * (fragments$length - insert_size[2])))
+    prob_keep <- p_left * p_right
+    keep_roll <- runif(nrow(fragments))
+    fragments[keep_roll <= prob_keep, 'size_selection'] <- 'passed_size_selection'
   } else {
     fragments[fragments$length >= insert_size[1] & fragments$length <= insert_size[2], 'size_selection'] <- 'passed_size_selection'
   }
   
-  fragments$length <- NULL  # Optional: drop if not needed
+  fragments$length <- NULL 
   
   return(fragments)
 }
@@ -156,7 +159,6 @@ random_string_gen <- function(n = 5000) {
 }
 
 full_reads <- file_importer(file)
-#Get gene that was simulated
 gene_id <- sub(".*\\/([A-Z]+[0-9]+(?:_[a-z]+)?)\\.tsv\\.gz$", "\\1", file)
 
 
@@ -165,39 +167,34 @@ list_with_all_fragments <- lapply(seq_len(nrow(full_reads)), function(i) {
             insert_size = insert_size,
             transcript_id = full_reads$transcript_id[i],
             no_fragmentation = opt$no_fragmentation,
-            no_sizeselection = opt$no_sizeselection)
+            sizeselectiontype = opt$sizeselectiontype)
 })
 
 reads_list <- dplyr::bind_rows(list_with_all_fragments,.id = 'transcript_id')
 
-#Keep all fragments before filtering by their length
 reads_list_all_fragments <- reads_list
-#Keep fragments that are long enough
 reads_list <- reads_list[reads_list$size_selection=='passed_size_selection',]
 
 
-if (nrow(reads_list)>10){ #Some genes have really short mRNAs and will get filtered out during size selection
+if (nrow(reads_list)>10){ 
   reads_list$transcript_id <- as.numeric(reads_list$transcript_id)
   
-  #TPM assignment for TT-seq happens after fragmentation and 4sU PD
   reads_list$read_start <- as.integer(reads_list$read_start)
   reads_list$read_end <- as.integer(reads_list$read_end)
   
-  #Keep fragments longer than 10nt
   reads_list <- reads_list %>% dplyr::filter(read_end-read_start>10)
   
   reads_list <- reads_list %>%
     dplyr::mutate(read_coordinate = paste0(read_start, "-", read_end)) %>%
     dplyr::group_by(transcript_id) %>%
     dplyr::summarise(read_coordinates = paste(read_coordinate, collapse = ","), .groups = "drop")
-
+  
   
   full_reads$transcript_id <- as.numeric(full_reads$transcript_id)
   reads_list$transcript_id <- as.numeric(reads_list$transcript_id)
   
   full_reads <- merge(full_reads,reads_list,by='transcript_id')
   
-  #Export
   temp_dir <- paste(opt$dir_out,'/temp/mRNAs_with_fragments',sep = '')
   dir.create(temp_dir, showWarnings = FALSE, recursive = TRUE)
   path_for_file <- paste(temp_dir,'/',gene_id,'_fragments.tsv',sep = '')

@@ -194,7 +194,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, help="random seed for reproducibility")
     parser.add_argument("--experiment_time", type=int, default=15, help="experiment time in minutes")
     parser.add_argument("--bkg_molecules", type=float, default=0.0, help="Proportion of total reads that should be background (0.0 to 1.0). Default 0.")
-    parser.add_argument("--no_sizeselection", action="store_true", help="If specified, do not filter fragments by size")
+    parser.add_argument("--sizeselectiontype", choices=["none", "hardcut", "probabilistic"], default="probabilistic", help="Type of size selection")
     parser.add_argument("--no_fragmentation", action="store_true", help="If specified, do not fragment; keep full molecule length")
 
     args = parser.parse_args()
@@ -212,14 +212,13 @@ if __name__ == "__main__":
             f"--seq_depth {args.seq_depth}",
             f"--tpm_lower_limit {args.tpm_lower_limit}",
             f"--tpm_upper_limit {args.tpm_upper_limit}",
-            f"-o {args.o}"
+            f"-o {args.o}",
+            f"--sizeselectiontype {args.sizeselectiontype}"
         ]
     if args.seed:
         cmd_chop += ['--seed', str(args.seed)]
     if args.fragments:
         cmd_chop += ['--fragments with_ground_truth']
-    if args.no_sizeselection:
-        cmd_chop += ['--no_sizeselection']
     if args.no_fragmentation:
         cmd_chop += ['--no_fragmentation']
 
@@ -315,12 +314,11 @@ if __name__ == "__main__":
                 f"--seq_depth {args.seq_depth}",
                 f"--tpm_lower_limit {args.tpm_lower_limit}",
                 f"--tpm_upper_limit {args.tpm_upper_limit}",
-                f"-o {args.o}"
+                f"-o {args.o}",
+                f"--sizeselectiontype {args.sizeselectiontype}"
             ]
             if args.seed:
                 cmd_chop_bg += ['--seed', str(args.seed)]
-            if args.no_sizeselection:
-                cmd_chop_bg += ['--no_sizeselection']
             if args.no_fragmentation:
                 cmd_chop_bg += ['--no_fragmentation']
             
@@ -347,7 +345,6 @@ if __name__ == "__main__":
                 df_bg_frags = pd.read_csv(chopped_bg_path, delimiter="\t")
                 
                 if not df_bg_frags.empty:
-                    # Force numeric conversion and drop any corrupted string rows
                     df_bg_frags['transcript_id'] = pd.to_numeric(df_bg_frags['transcript_id'], errors='coerce')
                     df_bg_frags = df_bg_frags.dropna(subset=['transcript_id'])
                     
