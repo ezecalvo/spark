@@ -134,6 +134,10 @@ sequencing strategy:
   --s {rf,fr,unstranded}
                         library strandedness (default: rf)
   --fragments           export a ground truth for fragmentation & size selection (default: False)
+  --sizeselectiontype {none,hardcut,probabilistic}
+                        type of size selection. 'hardcut' strictly filters fragments outside the --insert_size limits, while 'probabilistic' applies a double-sided sigmoid retention curve
+                        around those limits (only valid for nascentrnapd and ttseq) (default: probabilistic)
+  --no_fragmentation    if specified, do not fragment (only valid for nascentrnapd and ttseq) (default: False)
 ```
 
 **Snippet to simulate 100nt fr-firststrand paired-end reads from 1000 genes from a TTseq library:**
