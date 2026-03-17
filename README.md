@@ -167,7 +167,7 @@ spark.py --mode seq_tech -o ./out_dir/ --experiment_type mnetseq --s rf --seq_ty
 
 ### Step 1: Gene Selection
 
-**Clustering by gene features (```--mode tsvgeneration```)**
+**Clustering by gene features (```--mode mRNAgeneration```)**
 
 SPARK is designed to select genes from which to simulate nascent RNA reads that represent a diversity of genomic features. Users specify the number of genes from which they would like to simulate reads and provide: (1) a gtf with gene annotations and (2) a reference fasta file. For each gene, the longest isoform (upstream-most transcript start site and downstream-most transcript end site) is selected, and its features are used for classification. Genes in the gtf are first categorized by gene length, total transcript length(s), number of exons, mean exon lengths, number of introns, mean intron lengths, first intron length, lengths of 5′ and 3′ untranslated regions (UTRs), and exonic and intronic nucleotide composition. Hierarchical clustering is used to identify clusters of transcripts with similar characteristics. 
 
