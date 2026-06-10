@@ -150,4 +150,10 @@ dependencies:
   - r-dplyr
   - r-tidyr
   - scipy
+  - tqdm
+variables:
+  MKL_NUM_THREADS: '1'
+  NUMEXPR_NUM_THREADS: '1'
+  OMP_NUM_THREADS: '1'
+  OPENBLAS_NUM_THREADS: '1'
 prefix: /home/ezequiel.calvo-umw/.conda/envs/spark
