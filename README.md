@@ -91,6 +91,7 @@ spark.py --show_presets
 | `mNETseq` | mammalian Native Elongating Transcript (mNET)-seq | mnetseq | — | — | — | 0.10 |
 | `chromatinassociated` | Chromatin-associated RNA-seq | chromatin_associated | — | — | — | 0.20 |
 | `polyA` | Steady-state polyA | — | — | none | 0.005,0.023 | — |
+
 Presets can also be customized by additional flags on top of it. For example, to run the mNETseq preset but with deeper sequencing library:
 ```
 spark.py --preset mNETseq -o ./out_dir/ --n 1000 \
