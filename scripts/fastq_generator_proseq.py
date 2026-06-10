@@ -7,6 +7,7 @@ import subprocess
 import string
 import ast
 import numpy as np
+import hashlib
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -163,7 +164,8 @@ if __name__ == "__main__":
         np.random.seed(args.seed)
 
     cmd_chop = [
-        f"Rscript {os.path.join(SCRIPT_DIR, 'short_read_chopper_proseq.R')}",
+        f"python {os.path.join(SCRIPT_DIR, 'short_read_chopper.py')}",
+        "--mode proseq",
         f"--tsv {args.input_df}",
         f"--insert_size {args.insert_size}",
         f"--read_length {args.read_length}",
@@ -177,8 +179,8 @@ if __name__ == "__main__":
         cmd_chop += ['--seed', str(args.seed)]
     run_cmd(" ".join(cmd_chop))
 
-    filename = os.path.splitext(os.path.basename(args.input_df))[0]
-    base_filename = filename.split("_")[0]
+    filename = os.path.basename(args.input_df)
+    base_filename = filename.replace("_proseq.tsv.gz", "")
     output_prefix = f"{args.o}/reads/{base_filename}"
     chopped_coordinates_file_path = f"{args.o}/temp/mRNAs_with_fragments/{base_filename}_fragments.tsv"
 
@@ -217,7 +219,8 @@ if __name__ == "__main__":
 
         if os.path.exists(path_to_BGmRNAs) and os.path.getsize(path_to_BGmRNAs) > 0:
             cmd_chop_bg = [
-                f"Rscript {os.path.join(SCRIPT_DIR, 'short_read_chopper_TTseq.R')}",
+                f"python {os.path.join(SCRIPT_DIR, 'short_read_chopper.py')}",
+                "--mode proseq",
                 f"--tsv {path_to_BGmRNAs}",
                 f"--insert_size {args.insert_size}",
                 f"--read_length {args.read_length}",
@@ -257,8 +260,18 @@ if __name__ == "__main__":
                 pass
 
         gene_tpm = np.random.uniform(low=int(args.tpm_lower_limit), high=int(args.tpm_upper_limit))
+        
+        
+        temp_dir_tpm = os.path.join(args.o, "temp")
+        os.makedirs(temp_dir_tpm, exist_ok=True)
+        tpm_path = os.path.join(temp_dir_tpm, f"temp_{base_filename}_tpm.tsv")
+        
+        df_tpm = pd.DataFrame([{"gene_id": base_filename, "tpm": gene_tpm}])
+        df_tpm.to_csv(tpm_path, sep="\t", index=False)
+        
+        
         seq_depth = args.seq_depth / 1e6
-        reads_to_get = int(gene_length * gene_tpm * seq_depth)
+        reads_to_get = int(gene_tpm * seq_depth)
 
         if len(result_df) >= reads_to_get:
             result_df = result_df.sample(n=reads_to_get, replace=False, random_state=None)
@@ -293,3 +306,4 @@ if __name__ == "__main__":
 
     except FileNotFoundError:
         pass
+

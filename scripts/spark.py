@@ -1,4 +1,3 @@
-
 import argparse
 import subprocess
 import random
@@ -8,16 +7,86 @@ import sys
 import numpy as np
 import pandas as pd
 import gzip
+import logging
+from tqdm import tqdm
 from datetime import datetime
 from multiprocessing import Pool
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 args = None 
 
+PRESETS = {
+    "default": {
+    },
+    "DRB4sUseq": {        
+        "experiment_type": "metaboliclabeling",
+        "drb": True,
+        "labeling_base": "T",
+        "nt_inc_prob": "0.005,0.023",
+        "bkg_molecules": 0.15
+    },
+    "4sUseq": {
+        "experiment_type": "metaboliclabeling",
+        "labeling_base": "T",
+        "nt_inc_prob": "0.005,0.023",
+        "bkg_molecules": 0.15
+    },
+    "TTseq": {
+        "experiment_type": "ttseq",
+        "labeling_base": "T",
+        "nt_inc_prob": "0.005,0.023",
+        "bkg_molecules": 0.10
+    },
+    "BrUseq": {        
+        "experiment_type": "metaboliclabeling",
+        "labeling_base": "T",
+        "nt_inc_prob": "0.001,0.005",
+        "bkg_molecules": 0.15
+    },
+    "mNETseq": {        
+        "experiment_type": "mnetseq",
+        "bkg_molecules": 0.10
+    },
+    "proseq": {        
+        "experiment_type": "proseq",
+        "bkg_molecules": 0.02
+    },
+    "chromatinassociated": {        
+        "experiment_type": "chromatin_associated",
+        "bkg_molecules": 0.20
+    },
+    "TT-TimelapseSeq": {
+        "experiment_type": "ttseq",
+        "labeling_base": "T",
+        "sub_base": "C",
+        "nt_inc_prob": "0.005,0.023",
+        "bkg_molecules": 0.05
+    },
+    "eSLAM-seq": {
+        "experiment_type": "metaboliclabeling",
+        "labeling_base": "T",
+        "sub_base": "C",
+        "nt_inc_prob": "0.005,0.023",
+        "bkg_molecules": 0.10
+    },
+    "polyA": {
+        "experiment_type": "metaboliclabeling",
+        "bkg_molecules": 1
+    }
+}
+
+def c_log(msg):
+    print(f"[SPARK] {msg}")
+    logging.info(msg)
 
 def run_cmd(cmd):
-    print(f"[Running] {cmd}")
-    subprocess.run(cmd, shell=True, check=True)
+    logging.info(f"CMD: {cmd}")
+    try:
+        subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Command failed: {cmd}")
+        logging.error(f"STDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}")
+        raise
 
 def count_reads(fastq_file):
     if not os.path.exists(fastq_file): return 0
@@ -27,16 +96,16 @@ def count_reads(fastq_file):
         lines = int(stdout.strip())
         return lines // 4
     except Exception as e:
-        print(f"Error counting reads in {fastq_file}: {e}")
+        logging.error(f"Error counting reads in {fastq_file}: {e}")
         return 0
 
 def downsample_library(r1_file, r2_file, target_depth, seed):
     current_reads = count_reads(r1_file)
     if current_reads <= target_depth:
-        print(f"[Info] Total reads ({current_reads}) <= target depth ({target_depth}). No downsampling needed.")
+        c_log(f"Total reads ({current_reads}) <= target depth ({target_depth}). No downsampling needed.")
         return
 
-    print(f"[Downsampling] Reducing from {current_reads} to approx {target_depth} reads...")
+    c_log(f"Downsampling from {current_reads} to approx {target_depth} reads...")
     
     frac = target_depth / current_reads
     
@@ -70,13 +139,86 @@ def downsample_library(r1_file, r2_file, target_depth, seed):
         if r2_file:
             os.replace(r2_out, r2_file)
         
-        print(f"[Downsampling] Complete. Files updated.")
+        c_log("Downsampling Complete. Files updated.")
 
     except Exception as e:
-        print(f"[Error] Downsampling failed: {e}")
+        logging.error(f"Downsampling failed: {e}")
         if os.path.exists(r1_out): os.remove(r1_out)
         if r2_file and os.path.exists(r2_out): os.remove(r2_out)
 
+def consolidate_ground_truth(output_dir, args):
+    temp_dir = os.path.join(output_dir, "temp")
+    master_path = os.path.join(output_dir, "ground_truth_per_gene.tsv")
+    
+    #load temp files for ground truth
+    def load_temp_files(pattern):
+        files = glob.glob(os.path.join(temp_dir, pattern))
+        if not files:
+            return pd.DataFrame(), []
+        df_list = [pd.read_csv(f, sep='\t') for f in files]
+        return pd.concat(df_list, ignore_index=True).drop_duplicates(), files
+
+    init_df, init_files = load_temp_files("temp_*_initiation.tsv")
+    cleavage_df, cleavage_files = load_temp_files("temp_*_cleavage.tsv")
+    tpm_df, tpm_files = load_temp_files("temp_*_tpm.tsv")
+    elongation_df, elong_files = load_temp_files("temp_*_elongation.tsv")
+    tss_pause_df, tss_pause_files = load_temp_files("temp_*_tss_pause.tsv")
+    seq_err_df, seq_err_files = load_temp_files("temp_*_seq_err.tsv")
+    pas_elong_df, pas_elong_files = load_temp_files("temp_*_pas_elong.tsv")
+    chromatin_hl_df, chromatin_hl_files = load_temp_files("temp_*_chromatin_halflife.tsv")
+
+    #rename half_life and drop extra columns from cleavage
+    if not cleavage_df.empty and 'half_life' in cleavage_df.columns:
+        cleavage_df.rename(columns={'half_life': 'cleavage_half_life'}, inplace=True)
+    if not cleavage_df.empty and 'pas_coordinates' in cleavage_df.columns:
+        cleavage_df.drop(columns=['pas_coordinates'], inplace=True)
+
+    #gather all new data that exists
+    new_dataframes = [df for df in [init_df, cleavage_df, tpm_df, elongation_df, tss_pause_df, seq_err_df, pas_elong_df, chromatin_hl_df] if not df.empty]
+    
+    if not new_dataframes:
+        return 
+        
+    c_log("Consolidating ground truth metrics into ground_truth_per_gene.tsv...")
+    
+    #outer merge all new metrics on gene_id
+    new_master = new_dataframes[0]
+    for df in new_dataframes[1:]:
+        new_master = pd.merge(new_master, df, on="gene_id", how="outer")
+
+    desired_cols = [
+        'gene_id',
+        'initiation_rate', 'tss_pause_position', 'tss_pause_duration_min',
+        'min_elongation_rate', 'max_elongation_rate', 'mean_elongation_rate',
+        'num_pauses', 'pause_duration_min', 'pause_positions',
+        'cleavage_half_life', 'PAS_elongation_rate',
+        'tpm', 'mean_seq_err',
+    ]
+    if getattr(args, 'experiment_type', None) == 'chromatin_associated':
+        desired_cols.append('chromatin_release_halflife_min')
+    final_cols = [c for c in desired_cols if c in new_master.columns]
+    new_master = new_master[final_cols]
+
+    #ff an older master ground truth exists, update it
+    if os.path.exists(master_path):
+        old_master = pd.read_csv(master_path, sep='\t')
+        old_master.set_index("gene_id", inplace=True)
+        new_master.set_index("gene_id", inplace=True)
+        combined = new_master.combine_first(old_master).reset_index()
+    else:
+        combined = new_master
+
+    #format column order
+    combined_cols = ['gene_id'] + [c for c in desired_cols if c in combined.columns and c != 'gene_id']
+    combined = combined[combined_cols]
+    
+    combined.to_csv(master_path, sep='\t', index=False)
+    logging.info(f"Ground Truth saved to {master_path}")
+
+    #cleanup the individual temp files
+    for f in (init_files + cleavage_files + tpm_files + elong_files + tss_pause_files + seq_err_files + pas_elong_files + chromatin_hl_files):
+        try: os.remove(f)
+        except OSError: pass
 
 def process_rates_file(tsv):
     cmd_rates = [
@@ -101,28 +243,50 @@ def process_mrna_file(region_file):
     premRNA_out_dir = os.path.join(output_dir, "pre-mRNA")
     
     gene_id = os.path.basename(region_file).split("_")[0]
-    if not gene_id.startswith("ENSG"): gene_id = "ENSG" + gene_id
     nt_file = os.path.join(dir_region_files, f"{gene_id}_RatesandTraversalTimes.gtf")
 
     if not os.path.isfile(nt_file):
-        print(f"Warning: nt file missing for {gene_id}, skipping.")
+        logging.warning(f"nt file missing for {gene_id}, skipping.")
         return
 
     cmd_label = [
         f"python {os.path.join(SCRIPT_DIR, 'mRNA_generator.py')}",
         f"--region_file {region_file}", f"--nt_file {nt_file}",
-        f"--experiment_time {args.experiment_time}", f"--mRNAcount 5000",
+        f"--experiment_time {args.experiment_time}", f"--mRNAcount {args.mRNAcount}",
         f"--seq_err {args.seq_err}", f"--nt_inc_rate {args.nt_inc_prob}",
         f"--subs_rate {args.subs_prob}", f"--labeling_base {args.labeling_base}",
         f"--bkg_molecules {args.bkg_molecules}", f"--initi_rate {args.initi_rate}",
+        f"--experiment_type {args.experiment_type}",
+        f"--cleavage_half_life {args.cleavage_half_life}",
+        f"--pas_elong_rate {args.pas_elong_rate}",
+        f"--readthrough_deg_rate {args.readthrough_deg_rate}",
+        f"--polyA_length {args.polyA_length}", 
+        f"--genome_fasta {args.genome_fasta}",
         f"--o {premRNA_out_dir}/"
     ]
     if args.seed: cmd_label.extend(['--seed', str(args.seed)])
     if args.drb: cmd_label.append('--drb')
     if args.sub_base: cmd_label.extend(['--sub_base', args.sub_base])
     if args.nosplicing: cmd_label.append("--nosplicing") 
+    if args.nocleavage: cmd_label.append("--nocleavage")
+    if args.immediate_cleavage: cmd_label.append("--immediate_cleavage")
     run_cmd(" ".join(cmd_label))
 
+def process_chromatin_isolation(mrna_file):
+    script_path = os.path.join(SCRIPT_DIR, 'chromatin_isolation.py')
+    carna_out_dir = os.path.join(args.o.rstrip('/'), 'caRNA_filtered')
+    os.makedirs(carna_out_dir, exist_ok=True)
+    
+    cmd = [
+        f"python {script_path}",
+        f"--input_df {mrna_file}",
+        f"--release_half_life {args.chromatin_release_half_life}",
+        f"--o {carna_out_dir}"
+    ]
+    if args.seed:
+        cmd += ["--seed", str(args.seed)]
+        
+    run_cmd(" ".join(cmd))
 
 def process_splicing(mrna_file):
     script_path = os.path.join(SCRIPT_DIR, 'spark_spliceosome.py')
@@ -148,7 +312,6 @@ def process_splicing(mrna_file):
         cmd += ["--mRNA_coordinates"]
 
     run_cmd(" ".join(cmd))
-
 
 def mrna_to_proseq(tsv):
     proseq_mrnas_dirout = os.path.join(args.o.rstrip('/'), "proseqmRNAs")
@@ -186,7 +349,8 @@ def nascent_to_fastq(tsv):
     if args.seq_tech == "longread":
         cmd = [f"python {os.path.join(SCRIPT_DIR, 'fastq_generator_long_read.py')}",
                f"--input_df {tsv}", f"--seq_type {args.seq_type}", f"--seq_depth {args.seq_depth}",
-               f"--tpm_lower_limit {tpm_lower}", f"--tpm_upper_limit {tpm_upper}", f"-o {output_dir}"]
+               f"--tpm_lower_limit {tpm_lower}", f"--tpm_upper_limit {tpm_upper}", f"-o {output_dir}",
+               f"--bkg_molecules {args.bkg_molecules}"]
     else: 
         cmd = [f"python {os.path.join(SCRIPT_DIR, 'fastq_generator_short_read.py')}",
                f"--input_df {tsv}", f"--insert_size {args.insert_size}", f"--read_length {args.read_length}",
@@ -196,7 +360,6 @@ def nascent_to_fastq(tsv):
         if args.sizeselectiontype: cmd.extend(["--sizeselectiontype", args.sizeselectiontype])
         if args.no_fragmentation: cmd.append("--no_fragmentation")
     if args.seed: cmd.extend(['--seed', str(args.seed)])
-
     run_cmd(" ".join(cmd))
 
 def ttseq_to_fastq(tsv):
@@ -211,50 +374,82 @@ def ttseq_to_fastq(tsv):
     if args.seed: cmd.extend(['--seed', str(args.seed)])
     run_cmd(" ".join(cmd))
 
+def carna_to_fastq(tsv):
+    output_dir = args.o.rstrip('/')
+    tpm_lower, tpm_upper = map(int, args.tpm.split(","))
+    if args.seq_tech == "longread":
+        cmd = [f"python {os.path.join(SCRIPT_DIR, 'fastq_generator_long_read.py')}",
+               f"--input_df {tsv}", f"--seq_type {args.seq_type}", f"--seq_depth {args.seq_depth}",
+               f"--tpm_lower_limit {tpm_lower}", f"--tpm_upper_limit {tpm_upper}", f"-o {output_dir}",
+               f"--bkg_molecules {args.bkg_molecules}"]
+    else: 
+        cmd = [f"python {os.path.join(SCRIPT_DIR, 'fastq_generator_short_read.py')}",
+               f"--input_df {tsv}", f"--insert_size {args.insert_size}", f"--read_length {args.read_length}",
+               f"--seq_type {args.seq_type}", f"--threads 1", f"--seq_depth {args.seq_depth}",
+               f"--tpm_lower_limit {tpm_lower}", f"--tpm_upper_limit {tpm_upper}", f"--s {args.s}", f"--o {output_dir}/", f"--experiment_time {args.experiment_time}", f"--bkg_molecules {args.bkg_molecules}", f"--experiment_type chromatin_associated"]
+        if args.fragments: cmd.append('--fragments')
+        if args.sizeselectiontype: cmd.extend(["--sizeselectiontype", args.sizeselectiontype])
+        if args.no_fragmentation: cmd.append("--no_fragmentation")
+    if args.seed: cmd.extend(['--seed', str(args.seed)])
+    run_cmd(" ".join(cmd))
 
 def main():
     global args
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     group_general_arguments = parser.add_argument_group('general arguments')
-    group_tsv_generation = parser.add_argument_group('tsv generation')
+    group_presets=parser.add_argument_group('presets')
+    group_tsv_generation = parser.add_argument_group('gene selection')
     group_rates_per_region = parser.add_argument_group('rates per region')
-    group_mRNAgeneration = parser.add_argument_group('mRNA generation')
+    group_mRNAgeneration = parser.add_argument_group('pre-mRNA generation')
+    group_mRNAprocessing = parser.add_argument_group('pre-mRNA processing')
     group_seq_tech = parser.add_argument_group('sequencing strategy')
 
-    group_general_arguments.add_argument("--mode", required=True, choices=["fullpipeline", "gene_selection", "rates_per_region", "mRNAgeneration", "seq_tech"], help="pipeline step to run")
+    group_general_arguments.add_argument("--mode", choices=["fullpipeline", "gene_selection", "rates_per_region", "mRNAgeneration", "seq_tech"], help="pipeline step to run",default='fullpipeline')
     group_general_arguments.add_argument("-o", type=str, default="./", help="output directory")
-    group_general_arguments.add_argument("--seed", type=int, help="random seed for reproducibility")
-    group_general_arguments.add_argument("--experiment_type", required=True, choices=["nascentrnapd", "proseq","ttseq","mnetseq"], help="type of experiment to simulate")
-    group_general_arguments.add_argument("--threads", type=int, default=1, help="Number of threads for parallel processing")
+    group_general_arguments.add_argument("--seed", type=int, help="random seed")
+    group_general_arguments.add_argument("--experiment_type", default="metaboliclabeling", choices=["metaboliclabeling", "proseq", "ttseq", "mnetseq", "chromatin_associated"], help="type of experiment to simulate")
+    group_general_arguments.add_argument("--threads", type=int, default=1, help="number of threads")
+    
+    group_presets.add_argument("--preset", choices=list(PRESETS.keys()), default="default", help="load a predefined set of parameters")
+    group_presets.add_argument("--show_presets", action="store_true", help="display all available presets and their default values, then exit.")
 
     group_tsv_generation.add_argument("--gtf", type=str, help="genome annotation file")
     group_tsv_generation.add_argument("--genome_fasta", type=str, help="genome fasta file")
     group_tsv_generation.add_argument("--protein_coding_only", action="store_true", help="only use protein-coding genes")
-    group_tsv_generation.add_argument("--n_gene_clusters", type=int, default=6, help="number of gene clusters")
-    group_tsv_generation.add_argument("--n", type=int, default=120, help="number of genes")
+    group_tsv_generation.add_argument("--n_gene_clusters", type=int, default=1, help="number of gene clusters to simulate")
+    group_tsv_generation.add_argument("--n", type=int, default=0, help="number of genes to simulate (set to 0 to simulate all genes in the GTF)")
 
-    group_rates_per_region.add_argument("--region_size_range", type=str, help="range of region sizes to split the gene into")
-    group_rates_per_region.add_argument('--num_regions', type=int, help='desired number of regions to split the gene into')
-    group_rates_per_region.add_argument("--elong_rate_range", default="500,5000", help="range of elongation rates")
-    group_rates_per_region.add_argument('--num_pauses', type=int, help='number of pauses across the gene',default=0)
-    group_rates_per_region.add_argument('--pause_time',default="0.1,0.5", type=str, help="length of the pausing event in minutes", required=False)
+    group_rates_per_region.add_argument("--region_size_range", type=str, help="range of elongation rate region sizes to split the gene into (default: 500,1000)")
+    group_rates_per_region.add_argument('--num_regions', type=int, help='number of elongation rate regions to split the gene into')
+    group_rates_per_region.add_argument("--elong_rate_range", default="500,5000", help="range of elongation rates in nt/min")
+    group_rates_per_region.add_argument('--num_pauses', type=int, default=0, help='number of pausing events across the gene')
+    group_rates_per_region.add_argument('--pause_time',default="0.1,0.5", type=str, help="length of the pausing event in minutes")
     group_rates_per_region.add_argument("--flat_rates", action="store_true", help="all nucleotides have the same elongation rate")
-    group_rates_per_region.add_argument('--promoter_pause_position', type=str, default='30,50', help='range of positions for TSS pausing')
+    group_rates_per_region.add_argument('--promoter_pause_position', type=str, default='30,50', help='range of position for TSS pausing')
     group_rates_per_region.add_argument('--promoter_pause_duration', type=str, default='0,0', help='length of promoter pausing in minutes')
-    group_rates_per_region.add_argument('--initi_rate',type=str,default='10,60',help='comma-separated range of seconds for initiation rate')
+    group_rates_per_region.add_argument('--initi_rate',type=str,default='10,60',help='range of seconds for initiation rate')
 
-    group_mRNAgeneration.add_argument("--experiment_time", type=int, default=15, help="experiment time in minutes")
+    group_mRNAgeneration.add_argument("--experiment_time", type=int, default=15, help="experiment duration in minutes")
     group_mRNAgeneration.add_argument("--seq_err", default="0.0001,0.0002", help="sequencing error rate")
-    group_mRNAgeneration.add_argument('--nt_inc_prob',type=str,default='0.09,0.1',help='comma-separated range of nucleotide incorporation probability')
-    group_mRNAgeneration.add_argument('--subs_prob',type=str,default='0.95,1',help='comma-separated range of nucleotide substitution probability if simulating nucleotide recoding')
-    group_mRNAgeneration.add_argument('--labeling_base', type=str, default='T', choices=["A", "C", "T", "G"],help='Specify the base analog that will get incorporated into the nascentRNA', required=False)
-    group_mRNAgeneration.add_argument('--sub_base', type=str, choices=["A", "C", "T", "G"], help='Specify the identity of the base after conversion', required=False)
-    group_mRNAgeneration.add_argument('--bkg_molecules', type=float, default=0,help='proportion of mRNA molecules that are derived from non-labeled RNA')
-    group_mRNAgeneration.add_argument("--drb", action="store_true", help="DRB treatment experiment for transcription synchronization")
-    group_mRNAgeneration.add_argument('--intron_half_life', default='0.8,1.2',help="range of intron half life in minutes for the introns to simulate spliicng")
-    group_mRNAgeneration.add_argument("--nosplicing", action="store_true", help="If set, skip all splicing simulation steps")
-    group_mRNAgeneration.add_argument("--mRNA_coordinates", action="store_true", help="If set, output a TSV with the coordinates of the surviving features (exons + retained introns)")
+    group_mRNAgeneration.add_argument('--nt_inc_prob',type=str,default='0.005,0.023',help='range of nucleotide incorporation probability')
+    group_mRNAgeneration.add_argument('--subs_prob',type=str,default='0.95,1',help='range of nucleotide substitution probability if simulating nucleotide recoding')
+    group_mRNAgeneration.add_argument('--labeling_base', type=str, default='T', choices=["A", "C", "T", "G"],help='specify the base analog that will get incorporated into the nascentRNA')
+    group_mRNAgeneration.add_argument('--sub_base', type=str, choices=["A", "C", "T", "G"], help='specify the identity of the base after conversion')
+    group_mRNAgeneration.add_argument('--bkg_molecules', type=float, default=0,help='proportion of mRNA molecules made before the start of the experiment (not nascent)')
+    group_mRNAgeneration.add_argument("--drb", action="store_true", help="simulate a DRB treatment experiment for transcription synchronization")
+    group_mRNAgeneration.add_argument("--mRNAcount", type=int, default=5000, help="total number of mRNA molecules to simulate, including background if speficied")
+
+    group_mRNAprocessing.add_argument("--cleavage_half_life", type=str, default="0.1,10.0", help="range of cleavage half-lives in min. Randomly chosen per gene")
+    group_mRNAprocessing.add_argument("--chromatin_release_half_life", type=str, default="2.0,5.0", help="Min,Max chromatin release half-life in minutes")
+    group_mRNAprocessing.add_argument("--pas_elong_rate", type=str, default="0.5,2.0", help="range of elongation rates in kb/min after passing the polyA site")
+    group_mRNAprocessing.add_argument("--readthrough_deg_rate", type=float, default=1.56, help="degradation rate of read-through transcripts after cleavage in kb/min")
+    group_mRNAprocessing.add_argument("--nocleavage", action="store_true", help="do not simulate cleavage")
+    group_mRNAprocessing.add_argument("--immediate_cleavage", action="store_true", help="simulate immediate cleavage at the polyA site without a half-life delay")
+    group_mRNAprocessing.add_argument('--intron_half_life', default='1,10',help="range of intron half life in minutes for the introns to simulate splicing")
+    group_mRNAprocessing.add_argument("--nosplicing", action="store_true", help="do not simulate splicing")
+    group_mRNAprocessing.add_argument("--polyA_length", type=str, default="50,150", help="range of polyA tail lengths to add to cleaved mRNAs (base range, subject to +/- 10%% jitter)")
+    group_mRNAprocessing.add_argument("--mRNA_coordinates", action="store_true", help="output a TSV with the coordinates of the surviving features (exons + retained introns)")
 
     group_seq_tech.add_argument("--seq_tech", choices=["longread", "shortread"], default="shortread", help="sequencing technology")
     group_seq_tech.add_argument("--seq_type", choices=["RNA", "cDNA", "SE", "PE"], default="SE",help="sequencing type")
@@ -264,22 +459,65 @@ def main():
     group_seq_tech.add_argument("--read_length", type=int, default=100, help="length of each read")
     group_seq_tech.add_argument("--s", choices=["rf", "fr", "unstranded"], default="rf", help="library strandedness")
     group_seq_tech.add_argument("--fragments", action="store_true", help="export a ground truth for fragmentation & size selection")
-    group_seq_tech.add_argument("--sizeselectiontype", choices=["none", "hardcut", "probabilistic"], default="probabilistic", help="type of size selection. 'hardcut' strictly filters fragments outside the --insert_size limits, while 'probabilistic' applies a double-sided sigmoid retention curve around those limits (only valid for nascentrnapd and ttseq)")
-    group_seq_tech.add_argument("--no_fragmentation", action="store_true", help="if specified, do not fragment (only valid for nascentrnapd and ttseq)")
+    group_seq_tech.add_argument("--sizeselectiontype", choices=["none", "hardcut", "probabilistic"], default="probabilistic", help="type of size selection. 'hardcut' strictly filters fragments outside the --insert_size limits, while 'probabilistic' applies a double-sided sigmoid retention curve")
+    group_seq_tech.add_argument("--no_fragmentation", action="store_true", help="if specified, do not fragment (only valid for metaboliclabeling and ttseq)")
+
+    #TWO-STEP PARSING FOR PRESETS
+    #check the known arguments
+    temp_args, _ = parser.parse_known_args()
+
+    #show presets
+    if temp_args.show_presets:
+        print("\n" + "="*45)
+        print("           AVAILABLE SPARK PRESETS")
+        print("="*45)
+        for preset_name, preset_params in PRESETS.items():
+            print(f"\n=> {preset_name}")
+            if not preset_params:
+                print("   (Uses standard CLI defaults)")
+            else:
+                for k, v in preset_params.items():
+                    print(f"   --{k:<20} {v}")
+        print("\n" + "="*45 + "\n")
+        sys.exit(0)
+
+    #override defaults if presets are chosen
+    if temp_args.preset and temp_args.preset != "default":
+        parser.set_defaults(**PRESETS[temp_args.preset])
 
     args = parser.parse_args()
+    
     output_dir = args.o.rstrip("/")
+    os.makedirs(output_dir, exist_ok=True)
+
+    #start log file
+    log_file = os.path.join(output_dir, "spark_pipeline.log")
+    logging.basicConfig(filename=log_file, level=logging.INFO,
+                        format='%(asctime)s [%(levelname)s] %(message)s',
+                        filemode='a')
+
+    c_log(f"Starting SPARK pipeline in mode: {args.mode}")
+    if args.preset != "default":
+        c_log(f"Loaded '{args.preset}' preset. Applying predefined parameters...")
+    c_log(f"Global Settings: Experiment={args.experiment_type}, SeqTech={args.seq_tech}, Threads={args.threads}")
 
     if args.seed is not None:
         np.random.seed(args.seed)
         random.seed(args.seed)
+        logging.info(f"Global seed set to: {args.seed}")
     
-    if args.region_size_range and args.num_regions:
+
+    if args.region_size_range is None and args.num_regions is None:
+        args.region_size_range = "500,5000"
+    if args.region_size_range is not None and args.num_regions is not None:
         raise ValueError("Specify only one of --region_size_range or --num_regions, not both.")
-    if args.n_gene_clusters > args.n:
+
+    if args.n != 0 and args.n_gene_clusters > args.n:
         sys.exit(f"Error: --n_gene_clusters ({args.n_gene_clusters}) cannot be greater than -n ({args.n})")
+    
+
     if args.experiment_type == 'mnetseq':
-        print("Warning: nt_inc_prob, subs_prob, or sub_base are not used for mNET-seq simulations")
+        logging.warning("nt_inc_prob, subs_prob, or sub_base are not used for mNET-seq simulations")
     if args.seq_tech == "longread" and args.seq_type not in ["RNA", "cDNA"]:
         parser.error("When --seq_tech is longread, --seq_type must be either RNA or cDNA.")
     if args.seq_tech == "shortread" and args.seq_type not in ["SE", "PE"]:
@@ -287,8 +525,9 @@ def main():
     if not (0.0 <= args.bkg_molecules <= 1.0):
         sys.exit("Error: --bkg_molecules must be a float between 0 and 1")
 
-
     if args.mode in ["fullpipeline", "gene_selection"]:
+        c_log("Running Gene Selection & Clustering...")
+        logging.info(f"Settings: GTF={args.gtf}, n_genes={args.n}, clusters={args.n_gene_clusters}")
         cmd_seq = [
             f"Rscript {os.path.join(SCRIPT_DIR, 'seq_and_clustering.R')}",
             f"-g {args.gtf}", f"-f {args.genome_fasta}", f"-o {output_dir}/",
@@ -299,26 +538,43 @@ def main():
         run_cmd(" ".join(cmd_seq))
 
     if args.mode in ["fullpipeline", "rates_per_region"]:
+        c_log("Generating Elongation Rates per Region...")
+        logging.info(f"Settings: elong_rate_range={args.elong_rate_range}, pause_time={args.pause_time}, flat_rates={args.flat_rates}")
         input_dir = f"{output_dir}/gtf"
         tsv_files = sorted(glob.glob(f"{input_dir}/*.tsv.gz"))
         if not tsv_files: sys.exit(f"No TSV files found in {input_dir}")
         with Pool(processes=args.threads) as pool:
-            pool.map(process_rates_file, tsv_files)
+            list(tqdm(pool.imap_unordered(process_rates_file, tsv_files), total=len(tsv_files), desc="Rates per region"))
 
     if args.mode in ["fullpipeline", "mRNAgeneration"]:
+        c_log("Generating Pre-mRNAs...")
+        logging.info(f"Settings: experiment_time={args.experiment_time}, mRNAcount={args.mRNAcount}, bkg_molecules={args.bkg_molecules}")
         dir_region_files=f"{output_dir}/rate_per_gene/"
         region_files = sorted(glob.glob(os.path.join(dir_region_files, "*VariableElongationRateRegions.gtf")))
         premRNA_out_dir = os.path.join(output_dir, "pre-mRNA")
         os.makedirs(premRNA_out_dir, exist_ok=True)
+        
         with Pool(processes=args.threads) as pool:
-            pool.map(process_mrna_file, region_files)
+            list(tqdm(pool.imap_unordered(process_mrna_file, region_files), total=len(region_files), desc="Pre-mRNA Gen"))
 
     if args.mode in ["fullpipeline", "mRNAgeneration"]:
         premRNA_out_dir = os.path.join(output_dir, "pre-mRNA")
-        transcript_files = sorted(glob.glob(os.path.join(premRNA_out_dir, "*.tsv.gz")))
-        with Pool(processes=args.threads) as pool:
-            pool.map(process_splicing, transcript_files)
+        
+        if args.experiment_type == 'chromatin_associated':
+            c_log("Running Chromatin Isolation...")
+            transcript_files_for_isolation = sorted(glob.glob(os.path.join(premRNA_out_dir, "*.tsv.gz")))
+            with Pool(processes=args.threads) as pool:
+                list(tqdm(pool.imap_unordered(process_chromatin_isolation, transcript_files_for_isolation), total=len(transcript_files_for_isolation), desc="Chromatin Iso"))
 
+            splice_input_dir = os.path.join(output_dir, "caRNA_filtered")
+        else:
+            splice_input_dir = premRNA_out_dir
+            
+        c_log("Processing Splicing Events...")
+        logging.info(f"Settings: intron_half_life={args.intron_half_life}, nosplicing={args.nosplicing}")
+        transcript_files_for_splicing = sorted(glob.glob(os.path.join(splice_input_dir, "*.tsv.gz")))
+        with Pool(processes=args.threads) as pool:
+            list(tqdm(pool.imap_unordered(process_splicing, transcript_files_for_splicing), total=len(transcript_files_for_splicing), desc="Splicing"))
 
     if args.mode in ["fullpipeline", "seq_tech"]:
         today_str = datetime.today().strftime("%Y%m%d")
@@ -326,44 +582,53 @@ def main():
         libraries_out_dir = os.path.join(output_dir, "final_libraries")
         os.makedirs(reads_out_dir, exist_ok=True)
         os.makedirs(libraries_out_dir, exist_ok=True)
+        
+        c_log(f"Generating Sequences ({args.experiment_type})...")
+        logging.info(f"Settings: seq_type={args.seq_type}, seq_depth={args.seq_depth}, insert_size={args.insert_size}, tpm={args.tpm}")
 
     if args.experiment_type == 'proseq' and args.mode in ["fullpipeline", "seq_tech"]:
         proseq_mrnas_dirout = os.path.join(output_dir, "proseqmRNAs")
         os.makedirs(proseq_mrnas_dirout, exist_ok=True)
-        tsv_files = [f for f in sorted(glob.glob(os.path.join(output_dir, "mRNA", "ENSG*.tsv.gz"))) if "background" not in os.path.basename(f)]
+        tsv_files = [f for f in sorted(glob.glob(os.path.join(output_dir, "mRNA", "*.tsv.gz"))) if "background" not in os.path.basename(f)]
         with Pool(args.threads) as pool:
-            pool.map(mrna_to_proseq, tsv_files)
+            list(tqdm(pool.imap_unordered(mrna_to_proseq, tsv_files), total=len(tsv_files), desc="mRNA -> PROseq"))
         
-        proseq_files = [f for f in sorted(glob.glob(os.path.join(proseq_mrnas_dirout, "ENSG*_proseq.tsv.gz"))) if "background" not in os.path.basename(f)]
+        proseq_files = [f for f in sorted(glob.glob(os.path.join(proseq_mrnas_dirout, "*_proseq.tsv.gz"))) if "background" not in os.path.basename(f)]
         with Pool(args.threads) as pool:
-            pool.map(proseq_to_fastq, proseq_files)
+            list(tqdm(pool.imap_unordered(proseq_to_fastq, proseq_files), total=len(proseq_files), desc="PROseq -> FastQ"))
 
     elif args.experiment_type == 'mnetseq' and args.mode in ["fullpipeline", "seq_tech"]:
         mnetseq_mrnas_dirout = os.path.join(output_dir, "mnetseqmRNAs")
         os.makedirs(mnetseq_mrnas_dirout, exist_ok=True)
-        tsv_files = [f for f in sorted(glob.glob(os.path.join(output_dir, "mRNA", "ENSG*.tsv.gz"))) if "background" not in os.path.basename(f)]
+        tsv_files = [f for f in sorted(glob.glob(os.path.join(output_dir, "mRNA", "*.tsv.gz"))) if "background" not in os.path.basename(f)]
         with Pool(args.threads) as pool:
-            pool.map(mrna_to_mnetseq, tsv_files)
+            list(tqdm(pool.imap_unordered(mrna_to_mnetseq, tsv_files), total=len(tsv_files), desc="mRNA -> mNETseq"))
 
-        mnetseq_files = [f for f in sorted(glob.glob(os.path.join(mnetseq_mrnas_dirout, "ENSG*_mnetseq.tsv.gz"))) if "background" not in os.path.basename(f)]
+        mnetseq_files = [f for f in sorted(glob.glob(os.path.join(mnetseq_mrnas_dirout, "*_mnetseq.tsv.gz"))) if "background" not in os.path.basename(f)]
         with Pool(args.threads) as pool:
-            pool.map(mnetseq_to_fastq, mnetseq_files)
+            list(tqdm(pool.imap_unordered(mnetseq_to_fastq, mnetseq_files), total=len(mnetseq_files), desc="mNETseq -> FastQ"))
 
-    elif args.experiment_type == 'nascentrnapd' and args.mode in ["fullpipeline", "seq_tech"]:
-        tsv_files = [f for f in sorted(glob.glob(os.path.join(output_dir, "mRNA", "ENSG*.tsv.gz"))) if "background" not in os.path.basename(f)]
+    elif args.experiment_type == 'metaboliclabeling' and args.mode in ["fullpipeline", "seq_tech"]:
+        tsv_files = [f for f in sorted(glob.glob(os.path.join(output_dir, "mRNA", "*.tsv.gz"))) if "background" not in os.path.basename(f)]
         with Pool(args.threads) as pool:
-            pool.map(nascent_to_fastq, tsv_files)
+            list(tqdm(pool.imap_unordered(nascent_to_fastq, tsv_files), total=len(tsv_files), desc="NascentRNA -> FastQ"))
 
     elif args.experiment_type == 'ttseq' and args.mode in ["fullpipeline", "seq_tech"]:
-        tsv_files = [f for f in sorted(glob.glob(os.path.join(output_dir, "mRNA", "ENSG*.tsv.gz"))) if "background" not in os.path.basename(f)]
+        tsv_files = [f for f in sorted(glob.glob(os.path.join(output_dir, "mRNA", "*.tsv.gz"))) if "background" not in os.path.basename(f)]
         with Pool(args.threads) as pool:
-            pool.map(ttseq_to_fastq, tsv_files)
+            list(tqdm(pool.imap_unordered(ttseq_to_fastq, tsv_files), total=len(tsv_files), desc="TTseq -> FastQ"))
+            
+    elif args.experiment_type == 'chromatin_associated' and args.mode in ["fullpipeline", "seq_tech"]:
+        tsv_files = [f for f in sorted(glob.glob(os.path.join(output_dir, "mRNA", "*.tsv.gz"))) if "background" not in os.path.basename(f)]
+        with Pool(args.threads) as pool:
+            list(tqdm(pool.imap_unordered(carna_to_fastq, tsv_files), total=len(tsv_files), desc="caRNA -> FastQ"))
             
     if args.mode in ["fullpipeline", "seq_tech"]:
         if not glob.glob(f"{reads_out_dir}/*fastq*"):
-            print("No read files found to concatenate. Skipping final step.")
+            c_log("No read files found to concatenate. Skipping final step.")
             return
 
+        c_log("Concatenating final libraries...")
         final_r1_path = None
         final_r2_path = None
 
@@ -388,23 +653,24 @@ def main():
             
         if final_r1_path and os.path.exists(final_r1_path):
             downsample_library(final_r1_path, final_r2_path, args.seq_depth, args.seed)
+
+    #consolidate ground truth data into a master file
+    consolidate_ground_truth(output_dir, args)
+
+    if args.mode in ["fullpipeline", "seq_tech"]:
+        c_log("Cleaning up temporary read files...")
+        reads_out_dir = os.path.join(output_dir, "reads")
+        if os.path.exists(reads_out_dir):
+            run_cmd(f'rm -f "{reads_out_dir}"/*fastq*')
         
-        run_cmd(f'rm -f "{reads_out_dir}"/*fastq*')
         temp_dir = f"{output_dir}/temp"
         if os.path.isdir(temp_dir):
             run_cmd(f'rm -rf "{temp_dir}"')
+            
+    c_log("Pipeline run complete!")
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
 
 
 

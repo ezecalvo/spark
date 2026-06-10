@@ -7,6 +7,7 @@ import subprocess
 import string
 import ast
 import numpy as np
+import hashlib
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -88,8 +89,9 @@ def process_and_write_fastq(
                     mol_arr[p] = random.choice([b for b in ['A','C','G','T'] if b != mol_arr[p]])
 
             try:
-                r_start = max(0, int(row.read_start) - 1) 
-                r_end = min(len(mol_arr), int(row.read_end))
+                r_start = max(0, int(row.read_start) - 1)
+                r_end = int(row.read_end)
+                r_end = min(len(mol_arr), r_end)
             except: continue
             
             if r_start >= r_end: continue
@@ -99,10 +101,6 @@ def process_and_write_fastq(
             downstream_start = max(r_start, r_end - read_length)
             downstream_end = r_end
             
-            if ttseq and not is_bg:
-                if not (np.any(is_inc[upstream_start:upstream_end]) or np.any(is_inc[downstream_start:downstream_end])):
-                    continue
-
             seq_upstream = "".join(mol_arr[upstream_start:upstream_end])
             seq_downstream = "".join(mol_arr[downstream_start:downstream_end])
 
@@ -203,15 +201,23 @@ if __name__ == "__main__":
     parser.add_argument("--sizeselectiontype", choices=["none", "hardcut", "probabilistic"], default="probabilistic")
     parser.add_argument("--no_fragmentation", action="store_true")
     parser.add_argument("--sub_base", type=str, default='C')
+    parser.add_argument("--experiment_type", type=str, default="metaboliclabeling")
 
     args = parser.parse_args()
 
+    filename = os.path.basename(args.input_df)
+    base_filename = filename.replace(".tsv.gz", "")
+
     if args.seed is not None:
-        random.seed(args.seed)
-        np.random.seed(args.seed)
+        hasher = hashlib.sha256(base_filename.encode('utf-8'))
+        gene_hash = int(hasher.hexdigest(), 16)
+        unique_seed = (args.seed + gene_hash) % 4294967295 
+        random.seed(unique_seed)
+        np.random.seed(unique_seed)
 
     cmd_chop = [
-            f"Rscript {os.path.join(SCRIPT_DIR, 'short_read_chopper.R')}",
+            f"python {os.path.join(SCRIPT_DIR, 'short_read_chopper.py')}",
+            "--mode normal",
             f"--tsv {args.input_df}",
             f"--insert_size {args.insert_size}",
             f"--read_length {args.read_length}",
@@ -228,8 +234,9 @@ if __name__ == "__main__":
 
     run_cmd(" ".join(cmd_chop))
     
-    filename = os.path.splitext(os.path.basename(args.input_df))[0]
-    base_filename = filename.split(".")[0]
+    filename = os.path.basename(args.input_df)
+    
+    base_filename = filename.replace(".tsv.gz", "")
     output_prefix = f"{args.o}/reads/{base_filename}"
     chopped_coordinates_file_path = f"{args.o}/temp/mRNAs_with_fragments/{base_filename}_fragments.tsv"
     rates_for_gene = f"{args.o}/rate_per_gene/{base_filename}_RatesandTraversalTimes.gtf"
@@ -276,21 +283,44 @@ if __name__ == "__main__":
     df_ref_raw['transcript_id'] = range(1, len(df_ref_raw) + 1)
     
     for _, row in df_ref_raw.iterrows():
+        #if the molecule incorporated zero analogs, it does not bind streptavidin beas or whatever the method is doing
+        #if the molecules come from chromatin fractionation there is no need for nucleotide analogs
+        if args.experiment_type != 'chromatin_associated':
+            if not row['incorporated_positions']: 
+                continue
+            
         clean_ref_dict[row['transcript_id']] = {
             'conv': row['converted_positions'],
             'inc': row['incorporated_positions'],
             'err': row['seq_err_positions'],
             'spliced_introns': row['spliced_introns'],
-            'mol_id': row['molecule_id']
+            'mol_id': row['molecule_id'],
         }
     del df_ref_raw 
 
     try:
-        df_exploded = pd.read_csv(chopped_coordinates_file_path, delimiter="\t")
-    except (FileNotFoundError, pd.errors.EmptyDataError):
+        df_frags = pd.read_csv(chopped_coordinates_file_path, delimiter="\t")
+        df_frags['read_coordinates'] = df_frags['read_coordinates'].astype(str).str.split(',')
+        df_exploded = df_frags.explode('read_coordinates').reset_index(drop=True)
+        
+        coord_split = df_exploded['read_coordinates'].str.split('-', expand=True)
+        df_exploded['read_start'] = pd.to_numeric(coord_split[0], errors='coerce')
+        df_exploded['read_end'] = pd.to_numeric(coord_split[1], errors='coerce')
+        df_exploded = df_exploded.dropna(subset=['read_start', 'read_end'])
+    except (FileNotFoundError, pd.errors.EmptyDataError, KeyError):
         df_exploded = pd.DataFrame(columns=['transcript_id', 'read_start', 'read_end'])
 
     gene_tpm = np.random.uniform(low=int(args.tpm_lower_limit), high=int(args.tpm_upper_limit))
+    
+    
+    temp_dir_tpm = os.path.join(args.o, "temp")
+    os.makedirs(temp_dir_tpm, exist_ok=True)
+    tpm_path = os.path.join(temp_dir_tpm, f"temp_{base_filename}_tpm.tsv")
+    
+    df_tpm = pd.DataFrame([{"gene_id": base_filename, "tpm": gene_tpm}])
+    df_tpm.to_csv(tpm_path, sep="\t", index=False)
+    
+
     seq_depth_million = args.seq_depth / 1e6
     
     total_reads_budget = int(gene_length * gene_tpm * seq_depth_million)
@@ -326,7 +356,8 @@ if __name__ == "__main__":
         if os.path.exists(path_to_BGmRNAs) and os.path.getsize(path_to_BGmRNAs) > 0:
             
             cmd_chop_bg = [
-                f"Rscript {os.path.join(SCRIPT_DIR, 'short_read_chopper.R')}",
+                f"python {os.path.join(SCRIPT_DIR, 'short_read_chopper.py')}",
+                "--mode normal",
                 f"--tsv {path_to_BGmRNAs}",
                 f"--insert_size {args.insert_size}",
                 f"--read_length {args.read_length}",
@@ -339,7 +370,7 @@ if __name__ == "__main__":
             ]
             if args.seed: cmd_chop_bg += ['--seed', str(args.seed)]
             if args.no_fragmentation: cmd_chop_bg += ['--no_fragmentation']
-            
+
             run_cmd(" ".join(cmd_chop_bg))
             
             offset_bg = 10_000_000 
@@ -358,17 +389,26 @@ if __name__ == "__main__":
                     'inc': row['incorporated_positions'],
                     'err': row['seq_err_positions'],
                     'spliced_introns': row['spliced_introns'],
-                    'mol_id': str(row['molecule_id']) + "_BG_"
+                    'mol_id': str(row['molecule_id']) + "_BG_",
+                    'start_offset': row['start_label_pos'] if 'start_label_pos' in row else 0
                 }
             del df_bg_ref
 
             chopped_bg_path = f"{args.o}/temp/mRNAs_with_fragments/{base_filename}_background_fragments.tsv"
             try:
-                df_bg_exploded = pd.read_csv(chopped_bg_path, delimiter="\t")
-                if not df_bg_exploded.empty:
-                    df_bg_exploded['transcript_id'] = pd.to_numeric(df_bg_exploded['transcript_id'], errors='coerce')
-                    df_bg_exploded = df_bg_exploded.dropna(subset=['transcript_id'])
-                    df_bg_exploded['transcript_id'] = df_bg_exploded['transcript_id'].astype(int) + offset_bg
+                df_bg = pd.read_csv(chopped_bg_path, delimiter="\t")
+                if not df_bg.empty:
+                    df_bg['transcript_id'] = pd.to_numeric(df_bg['transcript_id'], errors='coerce')
+                    df_bg = df_bg.dropna(subset=['transcript_id'])
+                    df_bg['transcript_id'] = df_bg['transcript_id'].astype(int) + offset_bg
+                    
+                    df_bg['read_coordinates'] = df_bg['read_coordinates'].astype(str).str.split(',')
+                    df_bg_exploded = df_bg.explode('read_coordinates').reset_index(drop=True)
+                    
+                    coord_split_bg = df_bg_exploded['read_coordinates'].str.split('-', expand=True)
+                    df_bg_exploded['read_start'] = pd.to_numeric(coord_split_bg[0], errors='coerce')
+                    df_bg_exploded['read_end'] = pd.to_numeric(coord_split_bg[1], errors='coerce')
+                    df_bg_exploded = df_bg_exploded.dropna(subset=['read_start', 'read_end'])
 
                     if len(df_bg_exploded) >= reads_to_get_bg:
                         df_bg_final = df_bg_exploded.sample(n=reads_to_get_bg, replace=False)
@@ -376,7 +416,7 @@ if __name__ == "__main__":
                         remainder = reads_to_get_bg - len(df_bg_exploded)
                         sampled_remainder = df_bg_exploded.sample(n=remainder, replace=True)
                         df_bg_final = pd.concat([df_bg_exploded, sampled_remainder], ignore_index=True)
-            except (FileNotFoundError, pd.errors.EmptyDataError):
+            except (FileNotFoundError, pd.errors.EmptyDataError, KeyError):
                 pass
 
     df_total = pd.concat([df_gene_final, df_bg_final], ignore_index=True)
@@ -407,3 +447,4 @@ if __name__ == "__main__":
         if 'chopped_bg_path' in locals() and os.path.exists(chopped_bg_path):
             os.remove(chopped_bg_path)
     except OSError: pass
+

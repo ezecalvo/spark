@@ -6,6 +6,7 @@ import gzip
 import os
 import numpy as np
 import ast
+import hashlib
 
 def reverse_complement(sequence):
     complement = str.maketrans('ACGTacgt', 'TGCAtgca')
@@ -21,43 +22,45 @@ def process_sequence(sequence, sequencing_type):
 def id_generator(size=12, chars=string.ascii_uppercase + string.digits):
     return "@" + ''.join(random.choice(chars) for _ in range(size - 1))   
 
-def reconstruct_main(ref_arr, stop_pos, conv_pos_str, err_pos_str, spliced_introns_str, sub_base):
+def reconstruct_main(ref_arr, stop_pos, conv_pos_str, err_pos_str, spliced_introns_str, sub_base, polyA_len):
     mol_arr = ref_arr[:int(stop_pos)].copy()
     
     if pd.notna(conv_pos_str) and conv_pos_str not in ("[]", "NA", "") and sub_base:
         try:
             conv_pos = ast.literal_eval(conv_pos_str)
-            valid = [p for p in conv_pos if p < stop_pos]
-            if valid:
-                mol_arr[valid] = sub_base
-        except:
-            pass
+            valid = [p for p in conv_pos if p < len(mol_arr)]
+            if valid: mol_arr[valid] = sub_base
+        except: pass
             
     if pd.notna(err_pos_str) and err_pos_str not in ("[]", "NA", ""):
         try:
             err_pos = ast.literal_eval(err_pos_str)
-            valid = [p for p in err_pos if p < stop_pos]
+            valid = [p for p in err_pos if p < len(mol_arr)]
             for p in valid:
                 orig = mol_arr[p]
                 poss = [b for b in ['A','C','G','T'] if b != orig]
                 mol_arr[p] = random.choice(poss)
-        except:
-            pass
+        except: pass
             
-    seq_str = "".join(mol_arr)
+    keep_mask = np.ones(len(mol_arr), dtype=bool)
+    
+    keep_mask[int(stop_pos):] = False
     
     if pd.notna(spliced_introns_str) and spliced_introns_str not in ("[]", "NA", ""):
         try:
             spliced_introns = ast.literal_eval(spliced_introns_str)
-            spliced_introns.sort(key=lambda x: x[0], reverse=True)
             for start, end in spliced_introns:
-                seq_str = seq_str[:start] + seq_str[end:]
-        except:
-            pass
+                keep_mask[start:end] = False
+        except: pass
+            
+    seq_str = "".join(mol_arr[keep_mask])
+    
+    if int(polyA_len) > 0:
+        seq_str += "A" * int(polyA_len)
             
     return seq_str
 
-def reconstruct_bg(bg_ref_arr, err_pos_str):
+def reconstruct_bg(bg_ref_arr, err_pos_str, polyA_len):
     mol_arr = bg_ref_arr.copy()
     if pd.notna(err_pos_str) and err_pos_str not in ("[]", "NA", ""):
         try:
@@ -69,11 +72,16 @@ def reconstruct_bg(bg_ref_arr, err_pos_str):
                 mol_arr[p] = random.choice(poss)
         except:
             pass
-    return "".join(mol_arr)
+            
+    seq_str = "".join(mol_arr)
+    if int(polyA_len) > 0:
+        seq_str += "A" * int(polyA_len)
+        
+    return seq_str
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input_df")    
+    parser.add_argument("--input_df")   
     parser.add_argument("--seq_type", choices=["RNA", "cDNA"], default='RNA')
     parser.add_argument('--seq_depth', type=int, default=20000000)
     parser.add_argument('--tpm_lower_limit', type=int, default=5)
@@ -85,12 +93,18 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if args.seed is not None:
-        random.seed(args.seed)
-        np.random.seed(args.seed)
+    filename = os.path.basename(args.input_df)
+    base_filename = filename.replace(".tsv.gz", "")
 
-    filename = os.path.splitext(os.path.basename(args.input_df))[0]
-    base_filename = filename.split(".")[0]
+    
+    if args.seed is not None:
+        hasher = hashlib.sha256(base_filename.encode('utf-8'))
+        gene_hash = int(hasher.hexdigest(), 16)
+        unique_seed = (args.seed + gene_hash) % 4294967295 
+        random.seed(unique_seed)
+        np.random.seed(unique_seed)
+    
+
     output_filename = os.path.join(args.o, 'reads', f"{base_filename}_{args.seq_type}.fastq.gz")
     os.makedirs(os.path.dirname(output_filename), exist_ok=True)
 
@@ -103,7 +117,9 @@ if __name__ == "__main__":
         ref_arr = np.array(list(ref_seq_full), dtype='U1')
         
         is_bg_spliced = True
-        path_to_BGmRNAs = os.path.join(args.o, "mRNA", f"{base_filename}_background.tsv.gz")
+        
+        
+        path_to_BGmRNAs = os.path.join(args.o.rstrip('/'), "mRNA", base_filename + "_background.tsv.gz")
         
         if os.path.exists(path_to_BGmRNAs) and os.path.getsize(path_to_BGmRNAs) > 0:
             try:
@@ -125,16 +141,23 @@ if __name__ == "__main__":
         exit(1)
 
     cpm_gene = random.randint(args.tpm_lower_limit, args.tpm_upper_limit)
-    reads_to_get_gene = int(round(args.seq_depth * cpm_gene / 10**6))
     
-    reads_to_get_bg = 0
+    temp_dir_tpm = os.path.join(args.o, "temp")
+    os.makedirs(temp_dir_tpm, exist_ok=True)
+    tpm_path = os.path.join(temp_dir_tpm, f"temp_{base_filename}_tpm.tsv")
+    
+    df_tpm = pd.DataFrame([{"gene_id": base_filename, "tpm": cpm_gene}])
+    df_tpm.to_csv(tpm_path, sep="\t", index=False)
+    
+    #calculate read counts
+    total_reads_budget = int(round(args.seq_depth * cpm_gene / 10**6))
+    
     if args.bkg_molecules > 0.0:
-        if args.bkg_molecules >= 1.0:
-            reads_to_get_bg = 1000 
-            reads_to_get_gene = 0
-        elif reads_to_get_gene > 0:
-            ratio = args.bkg_molecules / (1.0 - args.bkg_molecules)
-            reads_to_get_bg = int(reads_to_get_gene * ratio)
+        reads_to_get_bg = int(total_reads_budget * args.bkg_molecules)
+        reads_to_get_gene = total_reads_budget - reads_to_get_bg
+    else:
+        reads_to_get_bg = 0
+        reads_to_get_gene = total_reads_budget
 
     print(f"[LongRead] Target: {reads_to_get_gene} gene reads, {reads_to_get_bg} background reads.")
 
@@ -143,6 +166,9 @@ if __name__ == "__main__":
         if reads_to_get_gene > 0:
             df = pd.read_csv(args.input_df, delimiter="\t")
             
+            if not df.empty:
+                df = df[df['incorporated_positions'].notna() & (df['incorporated_positions'] != '[]')]
+                
             if not df.empty:
                 if len(df) >= reads_to_get_gene:
                     sampled_df = df.sample(n=reads_to_get_gene, replace=False)
@@ -156,12 +182,13 @@ if __name__ == "__main__":
                     read_name = f"{molecule_id}_{base_filename}"
                     
                     raw_seq = reconstruct_main(
-                        ref_arr, 
+                        ref_arr,
                         getattr(row, 'stop_label_pos', 0), 
                         getattr(row, 'converted_positions', '[]'), 
                         getattr(row, 'seq_err_positions', '[]'), 
                         getattr(row, 'spliced_introns', '[]'), 
-                        args.sub_base
+                        args.sub_base,
+                        getattr(row, 'polyA_length', 0)
                     )
                     
                     sequence = process_sequence(raw_seq, args.seq_type)
@@ -171,7 +198,8 @@ if __name__ == "__main__":
             del df 
 
         if reads_to_get_bg > 0:
-            path_to_BGmRNAs = os.path.join(args.o, "mRNA", f"{base_filename}_background.tsv.gz")
+            
+            path_to_BGmRNAs = os.path.join(args.o.rstrip('/'), "mRNA", base_filename + "_background.tsv.gz")
             
             if os.path.exists(path_to_BGmRNAs) and os.path.getsize(path_to_BGmRNAs) > 0:
                 try:
@@ -191,7 +219,7 @@ if __name__ == "__main__":
                             molecule_id = id_generator()
                             read_name = f"{molecule_id}_{base_filename}_BG"
                             
-                            raw_seq = reconstruct_bg(bg_arr, getattr(row, 'seq_err_positions', '[]'))
+                            raw_seq = reconstruct_bg(bg_arr, getattr(row, 'seq_err_positions', '[]'), getattr(row, 'polyA_length', 0))
                             
                             sequence = process_sequence(raw_seq, args.seq_type)
                             quality_scores = "I" * len(sequence)

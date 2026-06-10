@@ -9,52 +9,28 @@ import hashlib
 def calculate_time_sums_optimized(mRNA_df, intron_df, mRNA_rates, strand):
     mRNA_rates_sorted = mRNA_rates.sort_values('nucleotide_coord').reset_index(drop=True)
     coords = mRNA_rates_sorted['nucleotide_coord'].values
-    times = mRNA_rates_sorted['time_for_this_nt'].values
-    
-    # Pre-calculate cumulative sum of times for O(1) range summation
+    times  = mRNA_rates_sorted['time_for_this_nt'].values
     cum_times = np.concatenate(([0], np.cumsum(times)))
-    
-    results = []
+
     initiation_times = mRNA_df['initiation_time'].values
-    start_positions = mRNA_df['start_label_pos'].values
-    stop_positions = mRNA_df['stop_label_pos'].values
-    
+    stop_positions   = mRNA_df['stop_label_pos'].values
+
     if strand == '+':
         splice_sites_3 = intron_df['end'].values
     else:
         splice_sites_3 = intron_df['start'].values
 
-    for i in range(len(mRNA_df)):
-        init_time = initiation_times[i]
-        start_pos = start_positions[i]
-        stop_pos = stop_positions[i]
-        
-        row_res = []
-        
-        for ss3 in splice_sites_3:
-            if stop_pos < ss3:
-                row_res.append(np.nan)
-                continue
+    ss3_idx = np.searchsorted(coords, splice_sites_3, side='right')
+    ss3_idx = np.clip(ss3_idx, 0, len(cum_times) - 1)
+    cum_at_ss3 = cum_times[ss3_idx]
 
-            idx_ss3 = np.searchsorted(coords, ss3, side='left')
-            idx_start = np.searchsorted(coords, start_pos, side='left')
-            
-            if ss3 < start_pos:
-                if idx_ss3 < idx_start:
-                    extra_time = cum_times[idx_start] - cum_times[idx_ss3]
-                    row_res.append(init_time + extra_time)
-                else:
-                    row_res.append(init_time)
-            else:
-                idx_ss3_right = np.searchsorted(coords, ss3, side='right')
-                if idx_start < idx_ss3_right:
-                    time_to_splice = cum_times[idx_ss3_right] - cum_times[idx_start]
-                    row_res.append(init_time - time_to_splice)
-                else:
-                    row_res.append(init_time)
+    t_available = initiation_times[:, np.newaxis] - cum_at_ss3[np.newaxis, :]
+    t_available = np.maximum(0.0, t_available)
 
-        results.append(row_res)
-    return results
+    not_reached = stop_positions[:, np.newaxis] < splice_sites_3[np.newaxis, :]
+    t_available = np.where(not_reached, np.nan, t_available)
+
+    return t_available.tolist()
 
 def determine_splicing_constant_half_life(t_available, half_life_value):
     n = len(t_available)
@@ -69,6 +45,7 @@ def determine_splicing_constant_half_life(t_available, half_life_value):
         
         used_half_lives[valid_mask] = half_life_value
         mean_life = half_life_value / np.log(2)
+        valid_t = np.maximum(valid_t, 0.0)
         p_spliced = 1 - np.exp(-valid_t / mean_life)
         
         spliced[valid_mask] = np.random.rand(n_valid) < p_spliced
@@ -101,14 +78,11 @@ def run_splicing_per_exon_vary_introns(time_sums_df, half_life_range, mean_half_
     return spliced_df, half_lives_df, this_run_half_life_dict
 
 def record_splicing_events(mRNA_df, spliced_df, intron_df, strand):
-    """
-    Replaces string manipulation by mathematically tracking the new sequence length 
-    and recording the 0-based relative intervals of the introns that were spliced out.
-    """
     spliced_matrix = spliced_df.values
     intron_starts = intron_df['start'].values
     intron_ends = intron_df['end'].values
     stop_positions = mRNA_df['stop_label_pos'].values
+    start_positions = mRNA_df['start_label_pos'].values # ADD THIS
     
     sequence_lengths = np.zeros(len(mRNA_df), dtype=int)
     spliced_introns_list = []
@@ -124,13 +98,12 @@ def record_splicing_events(mRNA_df, spliced_df, intron_df, strand):
                 start = intron_starts[j]
                 end = intron_ends[j]
                 
-                # Map genomic offsets to 0-based sequence indices
                 if strand == '+':
                     rs, re = start - 1, end
                 else:
                     rs, re = end, start + 1
                     
-                # Cap the removed interval by the transcription stop position
+                
                 rs = max(0, min(rs, stop_pos))
                 re = max(0, min(re, stop_pos))
                 
@@ -169,7 +142,9 @@ def get_surviving_features(mRNA_df, spliced_df, mRNA_gtf, strand, TSS_coord):
     intron_nums = introns['position'].values
 
     mol_stops = mRNA_df['stop_label_pos'].values[:, np.newaxis]
-    mol_indices = mRNA_df.index.values
+    
+    #extract molecule IDs
+    mol_ids = mRNA_df['molecule_id'].values
 
     exon_mask = exon_starts[np.newaxis, :] <= mol_stops
     kept_exon_rows, kept_exon_cols = np.nonzero(exon_mask)
@@ -179,7 +154,7 @@ def get_surviving_features(mRNA_df, spliced_df, mRNA_gtf, strand, TSS_coord):
     final_exon_ends = np.minimum(current_exon_ends, current_mol_stops_ex)
     
     df_exons = pd.DataFrame({
-        'molecule_index': mol_indices[kept_exon_rows],
+        'molecule_id': mol_ids[kept_exon_rows],
         'start': exon_starts[kept_exon_cols], 
         'end': final_exon_ends,
         'feature': 'exon',
@@ -197,7 +172,7 @@ def get_surviving_features(mRNA_df, spliced_df, mRNA_gtf, strand, TSS_coord):
     final_intron_ends = np.minimum(current_intron_ends, current_mol_stops_int)
     
     df_introns = pd.DataFrame({
-        'molecule_index': mol_indices[kept_intron_rows],
+        'molecule_id': mol_ids[kept_intron_rows], 
         'start': intron_starts[kept_intron_cols],
         'end': final_intron_ends,
         'feature': 'intron',
@@ -206,7 +181,7 @@ def get_surviving_features(mRNA_df, spliced_df, mRNA_gtf, strand, TSS_coord):
 
     all_features = pd.concat([df_exons, df_introns], ignore_index=True)
     if not all_features.empty:
-        all_features = all_features.sort_values(['molecule_index', 'start'])
+        all_features = all_features.sort_values(['molecule_id', 'start'])
     
     return all_features
 
@@ -305,11 +280,13 @@ if __name__ == "__main__":
     mRNA_df = pd.read_csv(args.mRNA_df, sep="\t", comment="#")
     output_filename_spliced_mRNAs = os.path.join(args.o, 'mRNA', base_filename + ".tsv.gz")
 
-   
     if args.nosplicing or "_background" in filename or mRNA_df.empty:
         if not mRNA_df.empty:
             if "_background" in filename:
-                mRNA_gtf = pd.read_csv(path_to_gtf, sep="\t", comment="#")
+                
+                correct_gtf_path = path_to_gtf.replace("_background.tsv.gz", ".tsv.gz")
+                mRNA_gtf = pd.read_csv(correct_gtf_path, sep="\t", comment="#")
+                
                 if args.nosplicing:
                     bg_len = mRNA_gtf['sequence'].str.len().sum()
                 else:
@@ -407,11 +384,23 @@ if __name__ == "__main__":
         half_life_df.to_csv(output_filename_halflives, sep='\t', compression='gzip', index=False)
 
         intron_df_out = mRNA_gtf[mRNA_gtf['feature'] == 'intron'].copy()
+        
+        #create a sequential 1-based index for the introns to map against
+        intron_df_out['intron_idx'] = range(1, len(intron_df_out) + 1)
         half_life_map = {int(k.replace('intron_', '')): v for k, v in run_mean_half_life_dict.items()}
-        intron_df_out['half_life'] = intron_df_out['position'].map(half_life_map)
+        
+        #nmap using the new index, NOT the GTF position
+        intron_df_out['half_life'] = intron_df_out['intron_idx'].map(half_life_map)
+        
         output_intron_abscoords = os.path.join(args.o, 'intron_half_lives', base_filename + "_abscoords.tsv.gz")
+        
+        cols_to_drop = ['intron_idx']
         if 'sequence' in intron_df_out.columns:
-            intron_df_to_save = intron_df_out.drop(columns=['sequence'])
-        else:
-            intron_df_to_save = intron_df_out
+            cols_to_drop.append('sequence')
+            
+        intron_df_to_save = intron_df_out.drop(columns=cols_to_drop)
         intron_df_to_save.to_csv(output_intron_abscoords, sep='\t', compression='gzip', index=False)
+
+
+
+

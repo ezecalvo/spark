@@ -7,6 +7,7 @@ import subprocess
 import string
 import ast
 import numpy as np
+import hashlib
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -115,7 +116,7 @@ def process_and_write_fastq(
 
             try:
                 r_start, r_end = map(int, str(row.read_coordinate_split).split('-'))
-                r_start = max(0, r_start - 1) 
+                r_start = max(0, r_start - 1)
                 r_end = min(r_end, len(mol_arr))
             except: continue
             if r_start >= r_end: continue
@@ -214,12 +215,22 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    filename = os.path.basename(args.input_df)
+    base_filename = filename.replace(".tsv.gz", "")
+
     if args.seed is not None:
-        random.seed(args.seed)
-        np.random.seed(args.seed)
+        hasher = hashlib.sha256(base_filename.encode('utf-8'))
+        gene_hash = int(hasher.hexdigest(), 16)
+        unique_seed = (args.seed + gene_hash) % 4294967295 
+        random.seed(unique_seed)
+        np.random.seed(unique_seed)
+
+        
+
 
     cmd_chop = [
-            f"Rscript {os.path.join(SCRIPT_DIR, 'short_read_chopper_TTseq.R')}",
+            f"python {os.path.join(SCRIPT_DIR, 'short_read_chopper.py')}",
+            "--mode ttseq",
             f"--tsv {args.input_df}",
             f"--insert_size {args.insert_size}",
             f"--read_length {args.read_length}",
@@ -232,8 +243,8 @@ if __name__ == "__main__":
 
     run_cmd(" ".join(cmd_chop))
 
-    filename = os.path.splitext(os.path.basename(args.input_df))[0]
-    base_filename = filename.split(".")[0]
+    filename = os.path.basename(args.input_df)
+    base_filename = filename.replace(".tsv.gz", "")
     output_prefix = f"{args.o}/reads/{base_filename}"
     chopped_coordinates_file_path = f"{args.o}/temp/mRNAs_with_fragments/{base_filename}_fragments.tsv"
 
@@ -296,6 +307,7 @@ if __name__ == "__main__":
             'mol_id': row['molecule_id'],
             'rel_inc': np.where(is_inc)[0]
         }
+
     del df_ref_raw 
 
     try: 
@@ -313,7 +325,8 @@ if __name__ == "__main__":
 
         if os.path.exists(path_to_BGmRNAs) and os.path.getsize(path_to_BGmRNAs) > 0:
             cmd_chop_bg = [
-                f"Rscript {os.path.join(SCRIPT_DIR, 'short_read_chopper_TTseq.R')}",
+                f"python {os.path.join(SCRIPT_DIR, 'short_read_chopper.py')}",
+                "--mode ttseq",
                 f"--tsv {path_to_BGmRNAs}",
                 f"--insert_size {args.insert_size}",
                 f"--read_length {args.read_length}",
@@ -390,6 +403,16 @@ if __name__ == "__main__":
             result_df = result_df[(result_df['insert_size'] >= min_insert) & (result_df['insert_size'] <= max_insert)]
 
         gene_tpm = np.random.uniform(low=int(args.tpm_lower_limit), high=int(args.tpm_upper_limit))
+        
+        
+        temp_dir_tpm = os.path.join(args.o, "temp")
+        os.makedirs(temp_dir_tpm, exist_ok=True)
+        tpm_path = os.path.join(temp_dir_tpm, f"temp_{base_filename}_tpm.tsv")
+        
+        df_tpm = pd.DataFrame([{"gene_id": base_filename, "tpm": gene_tpm}])
+        df_tpm.to_csv(tpm_path, sep="\t", index=False)
+        
+
         seq_depth = args.seq_depth / 1e6
         reads_to_get = gene_length * gene_tpm * seq_depth
 
@@ -462,3 +485,4 @@ if __name__ == "__main__":
 
     except FileNotFoundError:
         pass
+

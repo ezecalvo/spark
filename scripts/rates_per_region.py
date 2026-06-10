@@ -6,11 +6,11 @@ import os
 import hashlib
 
 def saveGTF(input_df, output_filename):
-    """Saves a DataFrame to a GTF-like tab-separated file."""
+    """save a DataFrame to a GTF-like tab-separated file."""
     input_df.to_csv(output_filename, sep='\t', index=False)
 
 def getDNAseq(dna_sequence):
-    """Concatenates a sequence from a pandas Series."""
+    """concat seqs"""
     return ''.join(str(i) for i in dna_sequence)
 
 def defineElongRateRegions(input_df_basename, df, dna_sequence,
@@ -19,9 +19,10 @@ def defineElongRateRegions(input_df_basename, df, dna_sequence,
                            pause_rate,
                            promoter_pause_upstream_limit, promoter_pause_downstream_limit,
                            TSS_pause_duration, num_pauses,
-                           num_regions=None):
+                           num_regions=None,
+                           flat_rates=False):
     """
-    Defines regions with varying or flat elongation rates, incorporating random and TSS-specific pauses.
+    define elong rate regions and pauses
     """
     region_data = []
     gene_length = len(dna_sequence)
@@ -35,7 +36,7 @@ def defineElongRateRegions(input_df_basename, df, dna_sequence,
     abs_start = df.iloc[0, 1]
     abs_end = df.iloc[0, 2]
 
-    # --- Generate region lengths ---
+    #generate region lengths
     if num_regions is not None:
         lengths = []
         total = 0
@@ -55,41 +56,40 @@ def defineElongRateRegions(input_df_basename, df, dna_sequence,
             lengths.append(l)
             total += l
 
-    # --- Random pauses ---
+    #random pauses if any
     pause_positions = set()
     if num_pauses > 0:
         if num_pauses > gene_length:
             raise ValueError("num_pauses cannot exceed gene length (nt)")
         pause_positions = set(random.sample(range(1, gene_length + 1), num_pauses))
 
-    # --- TSS pause ---
-    TSS_pause_position = random.randint(
-        promoter_pause_upstream_limit,
-        min(promoter_pause_downstream_limit, gene_length)
-    )
+    #TSS pause
+    safe_pause_min = min(promoter_pause_upstream_limit, gene_length)
+    safe_pause_max = min(promoter_pause_downstream_limit, gene_length)
+    TSS_pause_position = random.randint(safe_pause_min, safe_pause_max)
     all_pauses = set(pause_positions)
 
     if TSS_pause_duration > 0:
         all_pauses.add(TSS_pause_position)
         TSS_pause_elong_rate = 1 / TSS_pause_duration
 
-    # --- Build regions ---
+    #build regions
     rate_initial = round(random.uniform(min_rate, max_rate), 4)
     for region_length in lengths:
         end_coord = start_coord + region_length - 1
 
-        # Pauses inside this region
+        #pauses inside this region
         pauses_in_region = sorted([p for p in all_pauses if start_coord <= p <= end_coord])
 
         pos = start_coord
         for pause_pos in pauses_in_region:
-            # Normal segment before the pause
+            #normal segment before the pause
             if pos < pause_pos:
                 sub_end = pause_pos - 1
                 sub_len = sub_end - pos + 1
                 sequence = dna_sequence[pos - 1:sub_end]
 
-                # For any pause, the segments before and after have the same flat rate.
+                #for any pause, the segments before and after have the same flat rate
                 rate_final = rate_initial
                 rate_change_per_nt = 0
                 time_to_traverse = sub_len / rate_initial if sub_len > 0 and rate_initial > 0 else 0
@@ -100,10 +100,10 @@ def defineElongRateRegions(input_df_basename, df, dna_sequence,
                                     rate_change_per_nt, time_to_traverse,
                                     sequence))
                 
-                # The rate for the segment after the pause will be the same as the rate before.
+                #the rate for the segment after the pause will be the same as the rate before
                 pos = sub_end + 1
 
-            # Pause itself (1 nt)
+            #pause itself (1 nt)
             sequence = dna_sequence[pause_pos - 1:pause_pos]
             if pause_pos == TSS_pause_position:
                 time_to_traverse = 1 / TSS_pause_elong_rate
@@ -118,17 +118,13 @@ def defineElongRateRegions(input_df_basename, df, dna_sequence,
                                 time_to_traverse, sequence))
             pos = pause_pos + 1
 
-        # Final segment after last pause (if any)
+        #final segment after last pause (if any)
         if pos <= end_coord:
             sequence = dna_sequence[pos - 1:end_coord]
             sub_len = end_coord - pos + 1
 
-            # --- MODIFIED LOGIC START ---
-            # Removed the condition that forced flat rates if num_regions == 1
-            rate_final = rate_initial if args.flat_rates else round(random.uniform(min_rate, max_rate), 4)
-            # --- MODIFIED LOGIC END ---
-            
-            # Corrected calculation for rate change per nucleotide
+            rate_final = rate_initial if flat_rates else round(random.uniform(min_rate, max_rate), 4)            
+            #rate change epr nucleotide
             rate_change_per_nt = (rate_final - rate_initial) / (sub_len - 1) if sub_len > 1 else 0
             time_to_traverse = sub_len / ((rate_final + rate_initial) / 2) if sub_len > 0 else 0
 
@@ -138,7 +134,7 @@ def defineElongRateRegions(input_df_basename, df, dna_sequence,
                                 rate_change_per_nt, time_to_traverse,
                                 sequence))
             
-            rate_initial = rate_final if not args.flat_rates else round(random.uniform(min_rate, max_rate), 4)
+            rate_initial = rate_final if not flat_rates else round(random.uniform(min_rate, max_rate), 4)
 
         start_coord = end_coord + 1
 
@@ -149,24 +145,26 @@ def defineElongRateRegions(input_df_basename, df, dna_sequence,
 
     regions_df = pd.DataFrame(region_data, columns=columns)
 
-    # Adjust absolute coordinates based on strand, overwriting original columns to maintain output format
+    #abs coordinates based on strand
     if not regions_df.empty:
-        # Store original gene boundaries before overwriting the columns
+        #store original gene boundaries before overwriting the columns
         gene_start_col = regions_df['absolute_start'].iloc[0]
         gene_end_col = regions_df['absolute_end'].iloc[0]
 
         if strand == '+':
             regions_df["absolute_start"] = gene_start_col - 1 + regions_df["region_start_coord"]
             regions_df["absolute_end"]   = gene_start_col - 1 + regions_df["region_end_coord"]
-        else: # strand == '-'
+        else: #strand == '-'
             regions_df["absolute_start"] = gene_end_col - regions_df["region_end_coord"] + 1
             regions_df["absolute_end"]   = gene_end_col - regions_df["region_start_coord"] + 1
 
-    return regions_df
+    #return the TSS pause position (0 if no TSS pause was applied) and body pause positions
+    effective_tss_pause_position = TSS_pause_position if TSS_pause_duration > 0 else 0
+    return regions_df, effective_tss_pause_position, sorted(pause_positions)
 
 
 def ntTraversalTime(region_specific_eRates_df):
-    """Calculates the traversal time for each nucleotide based on region rates."""
+    """calculates the traversal time for each nnt"""
     if region_specific_eRates_df.empty:
         return pd.DataFrame()
         
@@ -223,8 +221,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # ------------------------------------------------------------
-    #extract the filename first so we can use it to create a unique seed.
+    #extract the filename first to create a unique seed.
     basename = os.path.basename(args.tsv)
     base_filename = basename.split('.')[0]
 
@@ -237,9 +234,8 @@ if __name__ == "__main__":
     	unique_seed = args.seed + file_hash_int
     	random.seed(unique_seed)
     
-    # ------------------------------------------------------------
 
-    # Parse region size or number
+    #parse region size or number
     if args.region_size_range and args.region_size_range != 'None':
         min_len, max_len = map(int, args.region_size_range.split(','))
         num_regions = None
@@ -249,26 +245,25 @@ if __name__ == "__main__":
     else:
         raise ValueError("Either --region_size_range or --num_regions must be specified.")
 
-    # Get TSS pausing position range
+    #get TSS pausing position range
     promoter_pause_upstream_limit, promoter_pause_downstream_limit = map(int, map(float, args.promoter_pause_position.split(',')))
 
-    # Get TSS pause duration
+    #get TSS pause duration
     promoter_pause_duration_min, promoter_pause_duration_max = map(float, args.promoter_pause_duration.split(','))
     
-    # Random calls now use the unique seed
+    #random calls now use the unique seed
     TSS_pause_duration = random.uniform(promoter_pause_duration_min, promoter_pause_duration_max)
 
-    # Get other parameters
+    #get all the other parameters
     elong_rate_range_min, elong_rate_range_max = map(float, args.elong_rate_range.split(','))
     pause_length_min, pause_length_max = map(float, args.pause_time.split(','))
     pause_duration = random.uniform(pause_length_min, pause_length_max)
     pause_elong_rate = 1 / pause_duration if pause_duration > 0 else float('inf')
 
-    # Read and process input file
+    #read and process input file
     df = pd.read_csv(args.tsv, sep='\t', comment='#')
-    df.columns = ['chr', 'start', 'end', 'gene_id', 'feature', 'position', 'strand', 'sequence']
+    df.columns = ['chr', 'start', 'end', 'gene_id', 'feature', 'position', 'strand', 'sequence', 'pas_coordinate']
 
-    # (Previous basename extraction lines were moved up, so we just set the dirs here)
     rate_per_gene_dir = os.path.join(args.o, "rate_per_gene")
     os.makedirs(rate_per_gene_dir, exist_ok=True)
 
@@ -276,7 +271,7 @@ if __name__ == "__main__":
 
     dna_sequence = getDNAseq(df.sequence)
 
-    df_regions = defineElongRateRegions(base_filename, df, dna_sequence,
+    df_regions, tss_pause_position, body_pause_positions = defineElongRateRegions(base_filename, df, dna_sequence,
                                         min_len, max_len,
                                         elong_rate_range_min, elong_rate_range_max,
                                         pause_elong_rate,
@@ -284,11 +279,41 @@ if __name__ == "__main__":
                                         num_pauses=args.num_pauses,
                                         promoter_pause_upstream_limit=promoter_pause_upstream_limit,
                                         promoter_pause_downstream_limit=promoter_pause_downstream_limit,
-                                        TSS_pause_duration=TSS_pause_duration)
+                                        TSS_pause_duration=TSS_pause_duration,
+                                        flat_rates=args.flat_rates)
 
     saveGTF(df_regions, output_filename_regions)
 
-    # Calculate Total Pause Time. Pauses are defined as 1-nucleotide regions.
+    #compute min/max elongation rates from non-pause regions only for the ground truth tsv
+    non_pause_mask = df_regions['region_start_coord'] != df_regions['region_end_coord']
+    non_pause_regions = df_regions[non_pause_mask]
+    if not non_pause_regions.empty:
+        all_rates = pd.concat([non_pause_regions['rate_initial'], non_pause_regions['rate_final']])
+        min_elongation_rate = round(float(all_rates.min()), 4)
+        max_elongation_rate = round(float(all_rates.max()), 4)
+    else:
+        min_elongation_rate = 0.0
+        max_elongation_rate = 0.0
+
+    #save rates/pause ground truth to temp file for master consolidation
+    temp_dir = os.path.join(args.o, "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    tss_pause_data = {
+        'gene_id': base_filename,
+        'tss_pause_position': tss_pause_position,
+        'tss_pause_duration_min': round(TSS_pause_duration, 4) if TSS_pause_duration > 0 else 0.0,
+        'min_elongation_rate': min_elongation_rate,
+        'max_elongation_rate': max_elongation_rate,
+    }
+    
+    if args.num_pauses > 0:
+        tss_pause_data['num_pauses'] = len(body_pause_positions)
+        tss_pause_data['pause_duration_min'] = round(pause_duration, 4)
+        tss_pause_data['pause_positions'] = str(body_pause_positions)
+    tss_pause_df = pd.DataFrame([tss_pause_data])
+    tss_pause_df.to_csv(os.path.join(temp_dir, f"temp_{base_filename}_tss_pause.tsv"), sep='\t', index=False)
+
+    #calculate total pausing time
     pause_regions_df = df_regions[df_regions['region_start_coord'] == df_regions['region_end_coord']]
     if not pause_regions_df.empty:
         total_pause_time_minutes = pause_regions_df['time_to_traverse'].sum()
@@ -304,3 +329,4 @@ if __name__ == "__main__":
     saveGTF(df_nt, output_filename_nttraversaltime)
 
     print(f"Processing complete. Output files are in: {rate_per_gene_dir}")
+
